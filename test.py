@@ -1,4 +1,3 @@
-import sympy as sp
 
 print("SymPy importado correctamente.")
 print("Versión de SymPy:", sp.__version__)
