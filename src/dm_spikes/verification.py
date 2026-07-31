@@ -1,5 +1,4 @@
 """Verification routines for numerical and analytical density profiles."""
-from matplotlib.pylab import gamma
 import numpy as np
 from scipy.interpolate import CubicSpline
 
@@ -52,6 +51,20 @@ def cusp_profile(r_values, M, gamma, R_S):
     g_gamma = np.maximum(1.0 - 4.0 * R_S / r_values,0.0,)**3
 
     return rho_r* g_gamma* np.power(R_sp / r_values, gamma_sp)
+
+def initial_cusp_profile(r_values, gamma):
+    """Initial GS cusp profile in Msun pc^-3 for radii in pc."""
+    r_values = np.asarray(r_values, dtype=float)
+
+    if np.any(r_values <= 0.0):
+        raise ValueError("Todos los radios deben ser positivos.")
+    if not (0.0 < gamma < 2.0):
+        raise ValueError("Se requiere 0 < gamma < 2.")
+
+    D = 8.5e3
+    rhoD = 0.0062 * (1.0 - gamma / 3.0)
+
+    return rhoD * np.power(r_values / D, -gamma)
 
 def isothermal_abs_error(numerical, analytical):
     """Absolute difference between numerical and analytical profiles."""

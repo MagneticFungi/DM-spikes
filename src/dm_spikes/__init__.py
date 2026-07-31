@@ -12,6 +12,7 @@ from .verification import (
     cusp_profile,
     cusp_rel_error,
     gamma_spike,
+    initial_cusp_profile,
     isothermal_abs_error,
     isothermal_profile,
     rho_R,
@@ -37,6 +38,7 @@ __all__ = [
     "rho_R",
     "gamma_spike",
     "cusp_profile",
+    "initial_cusp_profile",
     "isothermal_abs_error",
     "cusp_rel_error",
 ]
