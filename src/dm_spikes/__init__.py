@@ -4,11 +4,8 @@ from .density import rho_prime_at_r, rho_prime_profile, schwarzschild_radius
 from .isothermal import compute_isothermal_profile, make_isothermal_distribution
 from .storage import (
     list_density_profiles,
-    list_g_reconstructions,
     load_density_profiles,
-    load_g_reconstruction,
     save_density_profiles,
-    save_g_reconstruction,
 )
 from .verification import (
     alpha_gamma,
@@ -44,7 +41,4 @@ __all__ = [
     "initial_cusp_profile",
     "isothermal_abs_error",
     "cusp_rel_error",
-    "save_g_reconstruction",
-    "load_g_reconstruction",
-    "list_g_reconstructions",
 ]
