@@ -2,6 +2,7 @@
 import numpy as np
 from scipy.interpolate import CubicSpline
 
+D = 8.5e3
 # Cubic interpolation of the tabulated Gondolo-Silk alpha_gamma values.
 alfa_spline = CubicSpline(np.array([0.05, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 2.0]), np.array([0.0733, 0.12, 0.140, 0.142, 0.135, 0.122, 0.103, 0.0818, 0.0177]))
 
@@ -39,12 +40,15 @@ def gamma_spike(gamma):
     """Spike slope for a given gamma."""
     return (9.0 - 2.0 * gamma) / (4.0 - gamma)
 
+def rho_D(gamma):
+    """Density at the solar radius for a given gamma."""
+    return 0.0062 * (1.0 - gamma / 3.0)
+
 def cusp_profile(r_values, M, gamma, R_S):
     """Analytical Gondolo-Silk spike approximation profile in Msun pc^-3."""
     r_values = np.asarray(r_values, dtype=float)
 
-    D = 8.5e3
-    rhoD = 0.0062 * (1.0 - gamma / 3.0)
+    rhoD = rho_D(gamma)
     R_sp = spike_radius(M, gamma, rhoD, D)
     gamma_sp = gamma_spike(gamma)
     rho_r = rho_R(gamma, rhoD, D, R_sp)
@@ -61,8 +65,7 @@ def initial_cusp_profile(r_values, gamma):
     if not (0.0 < gamma < 2.0):
         raise ValueError("Se requiere 0 < gamma < 2.")
 
-    D = 8.5e3
-    rhoD = 0.0062 * (1.0 - gamma / 3.0)
+    rhoD = rho_D(gamma)
 
     return rhoD * np.power(r_values / D, -gamma)
 
