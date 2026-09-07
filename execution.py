@@ -407,7 +407,7 @@ def main():
             gamma_i = float(gamma_i)
 
             r_cusp_i = np.logspace(
-                np.log10(4.001 * R_S), np.log10(R_sp_i), 300
+                np.log10(4.001 * R_S), np.log10(R_sp_i), 600
             )
             worker_args = (
                 (gamma_i, float(r), M, D, 1e-5, 100) for r in r_cusp_i

@@ -1,0 +1,43 @@
+{
+  "npz": "results\\capture_fit_latest\\capture_factor_global_fit.npz",
+  "summary": "results\\capture_fit_latest\\capture_factor_global_fit_summary.txt",
+  "figures": "results\\capture_fit_latest\\figures",
+  "model_name": "simple_log_refined",
+  "formula": "A(gamma) x**B(gamma)",
+  "selected": {
+    "deg_A": 0,
+    "deg_B": 2,
+    "cv_log_rmse": 0.053063743463419,
+    "folds": 195
+  },
+  "coeffs_logA": [
+    0.015111398608519715
+  ],
+  "coeffs_logB": [
+    0.8815044083943646,
+    0.04600386809356462,
+    0.008627176525459907
+  ],
+  "coeffs_C": null,
+  "metrics": {
+    "rmse": 0.03310953203625534,
+    "mae": 0.025888594479126222,
+    "max_abs": 0.12150049867750301,
+    "log_rmse": 0.05338252278280823
+  },
+  "direct_metrics": {
+    "rmse": 0.02117189533668565,
+    "mae": 0.015533211853918554,
+    "max_abs": 0.09170290896379363,
+    "log_rmse": 0.27153615669396636
+  },
+  "log_metrics": {
+    "rmse": 0.03310953203625534,
+    "mae": 0.025888594479126222,
+    "max_abs": 0.12150049867750301,
+    "log_rmse": 0.05338252278280823
+  },
+  "warnings": [
+    "A(gamma) es una normalizacion efectiva y puede reflejar rho_R, R_sp o gamma_sp, no solo fisica de captura."
+  ]
+}

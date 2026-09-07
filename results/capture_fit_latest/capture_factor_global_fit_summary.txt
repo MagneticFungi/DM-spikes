@@ -1,0 +1,18 @@
+Ajuste global de g_gamma(r)
+
+Formula final: g_fit(r,gamma) = A(gamma) x**B(gamma), x = 1 - 4 R_S/r.
+Modelo seleccionado: simple_log_refined
+Grados seleccionados: A=0, B=2
+Dominio gamma: [0.01, 1.95]
+Dominio r/R_S usado: [4.001, 3.204347e+08]
+
+Coeficientes Chebyshev log A: [0.015111398609]
+Coeficientes Chebyshev log B: [0.881504408394 0.046003868094 0.008627176525]
+
+Metricas finales: RMSE=3.31095320e-02, MAE=2.58885945e-02, max_abs=1.21500499e-01, log_RMSE=5.33825228e-02
+Comparacion directa: RMSE=2.11718953e-02, log_RMSE=2.71536157e-01
+Comparacion log: RMSE=3.31095320e-02, log_RMSE=5.33825228e-02
+B_i medio por filas: 2.4084858; referencia Gondolo-Silk B=3.
+
+Advertencias:
+- A(gamma) es una normalizacion efectiva y puede reflejar rho_R, R_sp o gamma_sp, no solo fisica de captura.
