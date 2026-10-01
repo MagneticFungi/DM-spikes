@@ -1,0 +1,168 @@
+{
+  "serial_seconds": 615.9128703000024,
+  "parallel_seconds": 276.5911846999952,
+  "serial": [
+    {
+      "id": "numerical-gamma-0.75",
+      "config": {
+        "id": "numerical-gamma-0.75",
+        "M_bh": 1.0,
+        "G": 1.0,
+        "clight": 10.0,
+        "radii": [
+          0.04,
+          0.081
+        ],
+        "density": {
+          "factory": "dm_spikes.density_models:power_law",
+          "parameters": {
+            "rho0": 0.16,
+            "r0": 1.0,
+            "gamma": 0.75
+          }
+        },
+        "boundary": "confining",
+        "r_ref": 1.0,
+        "density_derivatives": true,
+        "potential_derivatives": true,
+        "final": {
+          "epsrel": 0.05
+        }
+      },
+      "radii": [
+        0.04,
+        0.081
+      ],
+      "rho_prime": [
+        0.0,
+        0.00020061823428129367
+      ],
+      "execution": {
+        "pid": 22276,
+        "seconds": 333.9571556999872
+      }
+    },
+    {
+      "id": "numerical-gamma-0.6",
+      "config": {
+        "id": "numerical-gamma-0.6",
+        "M_bh": 1.0,
+        "G": 1.0,
+        "clight": 10.0,
+        "radii": [
+          0.04,
+          0.081
+        ],
+        "density": {
+          "factory": "dm_spikes.density_models:power_law",
+          "parameters": {
+            "rho0": 0.16,
+            "r0": 1.0,
+            "gamma": 0.6
+          }
+        },
+        "boundary": "confining",
+        "r_ref": 1.0,
+        "density_derivatives": true,
+        "potential_derivatives": true,
+        "final": {
+          "epsrel": 0.05
+        }
+      },
+      "radii": [
+        0.04,
+        0.081
+      ],
+      "rho_prime": [
+        0.0,
+        0.00016883793210032948
+      ],
+      "execution": {
+        "pid": 22276,
+        "seconds": 281.95551569998497
+      }
+    }
+  ],
+  "parallel": [
+    {
+      "id": "numerical-gamma-0.75",
+      "config": {
+        "id": "numerical-gamma-0.75",
+        "M_bh": 1.0,
+        "G": 1.0,
+        "clight": 10.0,
+        "radii": [
+          0.04,
+          0.081
+        ],
+        "density": {
+          "factory": "dm_spikes.density_models:power_law",
+          "parameters": {
+            "rho0": 0.16,
+            "r0": 1.0,
+            "gamma": 0.75
+          }
+        },
+        "boundary": "confining",
+        "r_ref": 1.0,
+        "density_derivatives": true,
+        "potential_derivatives": true,
+        "final": {
+          "epsrel": 0.05
+        }
+      },
+      "radii": [
+        0.04,
+        0.081
+      ],
+      "rho_prime": [
+        0.0,
+        0.00020061823428129367
+      ],
+      "execution": {
+        "pid": 24596,
+        "seconds": 274.83761570000206
+      }
+    },
+    {
+      "id": "numerical-gamma-0.6",
+      "config": {
+        "id": "numerical-gamma-0.6",
+        "M_bh": 1.0,
+        "G": 1.0,
+        "clight": 10.0,
+        "radii": [
+          0.04,
+          0.081
+        ],
+        "density": {
+          "factory": "dm_spikes.density_models:power_law",
+          "parameters": {
+            "rho0": 0.16,
+            "r0": 1.0,
+            "gamma": 0.6
+          }
+        },
+        "boundary": "confining",
+        "r_ref": 1.0,
+        "density_derivatives": true,
+        "potential_derivatives": true,
+        "final": {
+          "epsrel": 0.05
+        }
+      },
+      "radii": [
+        0.04,
+        0.081
+      ],
+      "rho_prime": [
+        0.0,
+        0.00016883793210032948
+      ],
+      "execution": {
+        "pid": 26548,
+        "seconds": 262.68329320001067
+      }
+    }
+  ]
+}

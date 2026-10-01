@@ -1,0 +1,39 @@
+[
+  {
+    "id": "hernquist",
+    "M_bh": 1.0,
+    "G": 1.0,
+    "clight": 10.0,
+    "radii": [0.04, 0.081],
+    "density": {"factory": "dm_spikes.density_models:hernquist", "parameters": {"total_mass": 1.0, "scale_radius": 1.0}},
+    "boundary": "finite_escape",
+    "density_derivatives": true,
+    "potential_derivatives": true,
+    "final": {"epsrel": 0.001}
+  },
+  {
+    "id": "nfw",
+    "M_bh": 1.0,
+    "G": 1.0,
+    "clight": 10.0,
+    "radii": [0.04, 0.081],
+    "density": {"factory": "dm_spikes.density_models:nfw", "parameters": {"rho_s": 0.08, "r_s": 1.0}},
+    "boundary": "finite_escape",
+    "density_derivatives": true,
+    "potential_derivatives": true,
+    "final": {"epsrel": 0.001}
+  },
+  {
+    "id": "power-law-numerical",
+    "M_bh": 1.0,
+    "G": 1.0,
+    "clight": 10.0,
+    "radii": [0.04, 0.081],
+    "density": {"factory": "dm_spikes.density_models:power_law", "parameters": {"rho0": 0.16, "r0": 1.0, "gamma": 0.75}},
+    "boundary": "confining",
+    "r_ref": 1.0,
+    "density_derivatives": true,
+    "potential_derivatives": true,
+    "final": {"epsrel": 0.001}
+  }
+]
