@@ -1,5 +1,11 @@
 # Validación de la ejecución por perfiles — 1 de octubre de 2026
 
+> Informe histórico de la implementación por perfiles completos. Las pruebas,
+> ejemplos y benchmarks citados aquí fueron eliminados en una limpieza posterior
+> del repositorio y el backend `process` fue retirado después; sus cifras no
+> describen la suite actual. La extensión por
+> radios y su verificación están en [radial_validation.md](radial_validation.md).
+
 ## Estado inicial y conservación del trabajo
 
 Antes de editar: **96 pruebas pasadas en 16,72 s**. El árbol ya contenía

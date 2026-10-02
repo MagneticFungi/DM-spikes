@@ -1,4 +1,4 @@
-"""Serial and spawn-based execution of independent, JSON-configured profiles.
+"""Serial and spawn execution across JSON-configured profiles or their radii.
 
 No scientific callable or cache crosses a process boundary. Use an importable
 ``module:factory`` for a custom initial density. See docs/parallel_profiles.md.
@@ -6,7 +6,7 @@ No scientific callable or cache crosses a process boundary. Use an importable
 
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
 import importlib
@@ -166,6 +166,36 @@ def _density_from_spec(spec):
     return density
 
 
+def _build_numerical_profile(config):
+    """Construct the unchanged scalar numerical pipeline in the calling process."""
+    density = _density_from_spec(config["density"])
+    potential = make_initial_potential(
+        density, config["boundary"], G=config.get("G", G), r_ref=config.get("r_ref")
+    )
+    eddington_options = dict(config.get("eddington", {}))
+    if config.get("density_derivatives", False):
+        eddington_options.update(density_prime=density.prime, density_second=density.second)
+    if config.get("potential_derivatives", False):
+        eddington_options.update(potential_prime=potential.prime, potential_second=potential.second)
+    distribution = make_eddington_df(density, potential, config["boundary"], **eddington_options)
+    return make_final_profile(
+        distribution, potential, config["M_bh"], G=config.get("G", G),
+        clight=config.get("clight", C_LIGHT), **config.get("final", {})
+    )
+
+
+def _density_result(config, values):
+    radii = np.asarray(config["radii"], dtype=float)
+    values = np.asarray(values, dtype=float)
+    if values.shape != radii.shape or not np.all(np.isfinite(values)) or np.any(values < 0):
+        raise ArithmeticError("profile returned invalid density values")
+    result = {"id": config["id"], "config": config, "radii": radii.tolist(),
+              "rho_prime": values.tolist()}
+    if "annihilation" in config:
+        result["rho_spike"] = np.asarray(rho_spike(values, **config["annihilation"])).tolist()
+    return result
+
+
 def _execute(config):
     global _IN_PROFILE
     previous = _IN_PROFILE
@@ -177,19 +207,7 @@ def _execute(config):
         gravity, light = config.get("G", G), config.get("clight", C_LIGHT)
         engine = config.get("engine", "numerical")
         if engine == "numerical":
-            density = _density_from_spec(config["density"])
-            potential = make_initial_potential(
-                density, config["boundary"], G=gravity, r_ref=config.get("r_ref")
-            )
-            eddington_options = dict(config.get("eddington", {}))
-            if config.get("density_derivatives", False):
-                eddington_options.update(density_prime=density.prime, density_second=density.second)
-            if config.get("potential_derivatives", False):
-                eddington_options.update(potential_prime=potential.prime, potential_second=potential.second)
-            distribution = make_eddington_df(density, potential, config["boundary"], **eddington_options)
-            profile = make_final_profile(
-                distribution, potential, mass, G=gravity, clight=light, **config.get("final", {})
-            )
+            profile = _build_numerical_profile(config)
             values = np.asarray([profile(float(r)) for r in radii])
         else:
             radius_s = schwarzschild_radius(mass, G=gravity, clight=light)
@@ -198,12 +216,7 @@ def _execute(config):
                 values = np.asarray(cusp_profile(radii, mass, R_S=radius_s, **parameters))
             else:
                 values = np.asarray(isothermal_profile(radii, mass, R_S=radius_s, G=gravity, **parameters))
-        if values.shape != radii.shape or not np.all(np.isfinite(values)) or np.any(values < 0):
-            raise ArithmeticError("profile returned invalid density values")
-        result = {"id": config["id"], "config": config, "radii": radii.tolist(),
-                  "rho_prime": values.tolist()}
-        if "annihilation" in config:
-            result["rho_spike"] = np.asarray(rho_spike(values, **config["annihilation"])).tolist()
+        result = _density_result(config, values)
         result["execution"] = {"pid": os.getpid(), "seconds": time.perf_counter() - started}
         return result
     except Exception as exc:
@@ -236,60 +249,171 @@ def _spawn_environment(inner_threads):
                     os.environ[key] = value
 
 
-def run_profiles(configs, *, backend="serial", max_workers=None, inner_threads=1):
+def run_profiles(configs, *, backend="serial", max_workers=None, inner_threads=1, block_size=1):
     """Return results in input order, with a fresh callable/cache per profile.
 
-    ``backend='process'`` requires an explicit positive ``max_workers`` and
-    always uses spawn, including with one worker. Call it under a __main__
-    guard in an importable script. There are no pools at the radius level.
-    ``inner_threads`` sets native library limits in newly spawned interpreters;
-    it cannot reconfigure libraries already loaded in the serial caller.
+    ``backend='serial'`` evaluates every profile in the calling process.
+    ``backend='radial'`` processes numerical profiles one at a time and
+    distributes their radii among spawned workers. See ``iter_profiles_radial``
+    to consume/save each completed profile. Call the radial route under a
+    __main__ guard in an importable script. ``inner_threads`` limits native
+    libraries in the workers, not those already loaded in the serial caller.
     """
-    if backend not in ("serial", "process"):
-        raise ValueError("backend must be 'serial' or 'process'")
-    if type(inner_threads) is not int or inner_threads < 1:
-        raise ValueError("inner_threads must be a positive integer")
-    if backend == "process":
-        if _IN_PROFILE or mp.current_process().name != "MainProcess":
-            raise RuntimeError("nested process pools are not supported")
-        if type(max_workers) is not int or max_workers < 1:
-            raise ValueError("process backend requires an explicit positive max_workers")
-    else:
-        if max_workers is not None and (type(max_workers) is not int or max_workers != 1):
-            raise ValueError("max_workers applies only to the process backend")
-        if inner_threads != 1:
-            raise ValueError("inner_threads configures process workers; for serial execution set the environment before Python")
+    if backend == "radial":
+        return list(iter_profiles_radial(
+            configs, max_workers=max_workers, inner_threads=inner_threads, block_size=block_size
+        ))
+    if backend != "serial":
+        raise ValueError("backend must be 'serial' or 'radial'")
+    if type(block_size) is not int or block_size != 1:
+        raise ValueError("block_size applies only to the radial backend")
+    if max_workers is not None:
+        raise ValueError("max_workers applies only to the radial backend")
+    if type(inner_threads) is not int or inner_threads != 1:
+        raise ValueError("inner_threads configures radial workers; for serial execution set the environment before Python")
     jobs = [_prepare(config) for config in configs]
     ids = set()
     for job in jobs:
         if job["id"] in ids:
             raise ProfileConfigurationError(job["id"], "duplicate profile id in batch")
         ids.add(job["id"])
-    if backend == "serial":
-        return [_execute(job) for job in jobs]
-    if not jobs:
-        return []
-    results = [None] * len(jobs)
-    with _spawn_environment(inner_threads):
-        with ProcessPoolExecutor(max_workers=min(max_workers, len(jobs)),
-                                 mp_context=mp.get_context("spawn")) as pool:
-            pending = {}
-            try:
-                for index, job in enumerate(jobs):
-                    pending[pool.submit(_execute, job)] = index
-                for future in as_completed(pending):
-                    index = pending[future]
-                    results[index] = future.result()
-            except BrokenProcessPool as exc:
-                unresolved = [job["id"] for job, result in zip(jobs, results) if result is None]
-                raise ProfileExecutionError(
-                    jobs[index]["id"], f"process pool terminated; unresolved profiles: {unresolved}"
-                ) from exc
-            finally:
-                # Running jobs finish during shutdown; queued jobs can be cancelled.
-                for future in pending:
-                    future.cancel()
-    return results
+    return [_execute(job) for job in jobs]
 
 
-__all__ = ["run_profile", "run_profiles", "ProfileConfigurationError", "ProfileExecutionError"]
+# These objects exist only in a spawned radial worker. Initializing lazily in
+# its first task lets construction errors travel through a Future with their
+# original traceback, instead of killing the pool initializer.
+_RADIAL_CONFIG = None
+_RADIAL_PROFILE = None
+
+
+def _init_radial_worker(config):
+    global _RADIAL_CONFIG, _RADIAL_PROFILE, _IN_PROFILE
+    _RADIAL_CONFIG = config
+    _RADIAL_PROFILE = None
+    _IN_PROFILE = True
+
+
+def _radial_block(start, radii):
+    global _RADIAL_PROFILE
+    location = f"building profile for radii[{start}:{start + len(radii)}]"
+    try:
+        if _RADIAL_PROFILE is None:
+            _RADIAL_PROFILE = _build_numerical_profile(_RADIAL_CONFIG)
+        values = []
+        for offset, radius in enumerate(radii):
+            location = f"radius index {start + offset}, r={radius!r}"
+            value = float(_RADIAL_PROFILE(radius))
+            if not math.isfinite(value) or value < 0:
+                raise ArithmeticError("profile returned invalid density values")
+            values.append(value)
+        return values, os.getpid()
+    except Exception as exc:
+        raise ProfileExecutionError(
+            _RADIAL_CONFIG["id"], f"{location}: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
+def _check_radial_resources(max_workers, block_size, inner_threads):
+    if _IN_PROFILE or mp.current_process().name != "MainProcess":
+        raise RuntimeError("nested process pools are not supported")
+    for name, value in (("max_workers", max_workers), ("block_size", block_size),
+                        ("inner_threads", inner_threads)):
+        if type(value) is not int or value < 1:
+            raise ValueError(f"{name} must be an explicit positive integer")
+
+
+def _run_radial_prepared(config, max_workers, block_size, inner_threads):
+    started = time.perf_counter()
+    radii = config["radii"]
+    worker_count = min(max_workers, (len(radii) + block_size - 1) // block_size)
+    # The full grid and output remain in the parent. A worker receives the
+    # profile description once and only a small block of radii per subsequent task.
+    worker_config = {key: value for key, value in config.items() if key != "radii"}
+    values = [None] * len(radii)
+    worker_pids = set()
+    try:
+        with _spawn_environment(inner_threads):
+            with ProcessPoolExecutor(
+                max_workers=worker_count, mp_context=mp.get_context("spawn"),
+                initializer=_init_radial_worker, initargs=(worker_config,),
+            ) as pool:
+                starts = iter(range(0, len(radii), block_size))
+                pending = {}
+
+                def submit_next():
+                    start = next(starts, None)
+                    if start is not None:
+                        pending[pool.submit(_radial_block, start, radii[start:start + block_size])] = start
+
+                try:
+                    # Bound submission/memory independently of the grid length.
+                    for _ in range(2 * worker_count):
+                        submit_next()
+                    while pending:
+                        done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                        for future in done:
+                            start = pending.pop(future)
+                            block, pid = future.result()
+                            values[start:start + len(block)] = block
+                            worker_pids.add(pid)
+                        for _ in done:
+                            submit_next()
+                finally:
+                    for future in pending:
+                        future.cancel()
+        result = _density_result(config, values)
+        result["execution"] = {
+            "backend": "radial", "pid": os.getpid(), "worker_pids": sorted(worker_pids),
+            "requested_workers": max_workers, "max_workers": worker_count,
+            "block_size": block_size, "inner_threads": inner_threads,
+            "seconds": time.perf_counter() - started,
+        }
+        return result
+    except ProfileExecutionError:
+        raise
+    except BrokenProcessPool as exc:
+        raise ProfileExecutionError(
+            config["id"], "radial process pool terminated; the profile is incomplete"
+        ) from exc
+    except Exception as exc:
+        raise ProfileExecutionError(config["id"], f"{type(exc).__name__}: {exc}") from exc
+
+
+def run_profile_radial(config, *, max_workers, block_size=1, inner_threads=1):
+    """Evaluate one numerical profile using a spawn pool over its radii.
+
+    Each worker builds the original scalar pipeline once and retains its caches
+    between tasks. ``block_size=1`` schedules individual radii dynamically; larger
+    values group adjacent input entries without changing their quadratures.
+    A single worker still uses a child process. Returned radii retain input order.
+    """
+    return next(iter_profiles_radial(
+        [config], max_workers=max_workers, block_size=block_size, inner_threads=inner_threads
+    ))
+
+
+def iter_profiles_radial(configs, *, max_workers, block_size=1, inner_threads=1):
+    """Yield fully computed numerical profiles, one at a time, in input order.
+
+    All JSON/configuration validation precedes the first pool. The current pool
+    is closed before yielding its result; the next profile does not start until
+    the caller asks for the next result. This permits immediate per-profile saves
+    and guarantees there is at most one pool, with fresh state per profile.
+    Analytical engines should use their existing vectorized serial route.
+    """
+    _check_radial_resources(max_workers, block_size, inner_threads)
+    jobs = [_prepare(config) for config in configs]
+    ids = set()
+    for job in jobs:
+        if job.get("engine", "numerical") != "numerical":
+            raise ProfileConfigurationError(job["id"], "radial backend requires engine='numerical'")
+        if job["id"] in ids:
+            raise ProfileConfigurationError(job["id"], "duplicate profile id in batch")
+        ids.add(job["id"])
+    for job in jobs:
+        yield _run_radial_prepared(job, max_workers, block_size, inner_threads)
+
+
+__all__ = ["run_profile", "run_profiles", "run_profile_radial", "iter_profiles_radial",
+           "ProfileConfigurationError", "ProfileExecutionError"]

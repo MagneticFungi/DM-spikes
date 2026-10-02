@@ -1,0 +1,147 @@
+{
+  "platform": "Windows-11-10.0.26200-SP0",
+  "processor": "AMD64 Family 23 Model 96 Stepping 1, AuthenticAMD",
+  "python": "3.14.6",
+  "numpy": "2.5.0",
+  "scipy": "1.18.0",
+  "logical_cpus_visible": 6,
+  "start_method": "spawn",
+  "workers": 2,
+  "block_size": 1,
+  "inner_threads": 1,
+  "repetitions": 1,
+  "native_thread_environment": {
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "BLIS_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1"
+  },
+  "seconds": {
+    "serial": 505.34402540000156,
+    "radial": 282.7618776000454
+  },
+  "speedup": 1.7871716996970473,
+  "max_relative_difference": 7.993605777301127e-14,
+  "results": {
+    "serial": {
+      "id": "radial-full-quadrature",
+      "config": {
+        "id": "radial-full-quadrature",
+        "engine": "numerical",
+        "M_bh": 1.0,
+        "G": 1.0,
+        "clight": 10.0,
+        "radii": [
+          0.0815,
+          0.04,
+          0.081
+        ],
+        "density": {
+          "factory": "dm_spikes.density_models:power_law",
+          "parameters": {
+            "rho0": 0.16,
+            "r0": 1.0,
+            "gamma": 0.75
+          }
+        },
+        "boundary": "confining",
+        "r_ref": 1.0,
+        "density_derivatives": true,
+        "potential_derivatives": true,
+        "final": {
+          "epsrel": 0.05
+        },
+        "annihilation": {
+          "m": 1.0,
+          "observable_sigma_v": 0.1,
+          "bh_age": 1.0
+        }
+      },
+      "radii": [
+        0.0815,
+        0.04,
+        0.081
+      ],
+      "rho_prime": [
+        0.0005122839583720074,
+        0.0,
+        0.00020061823428127763
+      ],
+      "rho_spike": [
+        0.0005122577162309497,
+        0.0,
+        0.0002006142095944276
+      ],
+      "execution": {
+        "pid": 11788,
+        "seconds": 505.3438860999886
+      }
+    },
+    "radial": {
+      "id": "radial-full-quadrature",
+      "config": {
+        "id": "radial-full-quadrature",
+        "engine": "numerical",
+        "M_bh": 1.0,
+        "G": 1.0,
+        "clight": 10.0,
+        "radii": [
+          0.0815,
+          0.04,
+          0.081
+        ],
+        "density": {
+          "factory": "dm_spikes.density_models:power_law",
+          "parameters": {
+            "rho0": 0.16,
+            "r0": 1.0,
+            "gamma": 0.75
+          }
+        },
+        "boundary": "confining",
+        "r_ref": 1.0,
+        "density_derivatives": true,
+        "potential_derivatives": true,
+        "final": {
+          "epsrel": 0.05
+        },
+        "annihilation": {
+          "m": 1.0,
+          "observable_sigma_v": 0.1,
+          "bh_age": 1.0
+        }
+      },
+      "radii": [
+        0.0815,
+        0.04,
+        0.081
+      ],
+      "rho_prime": [
+        0.0005122839583720074,
+        0.0,
+        0.00020061823428129367
+      ],
+      "rho_spike": [
+        0.0005122577162309497,
+        0.0,
+        0.00020061420959444364
+      ],
+      "execution": {
+        "backend": "radial",
+        "pid": 11788,
+        "worker_pids": [
+          2764,
+          25900
+        ],
+        "requested_workers": 2,
+        "max_workers": 2,
+        "block_size": 1,
+        "inner_threads": 1,
+        "seconds": 282.7617346000043
+      }
+    }
+  },
+  "memory": "not measured; worker memory is not included in parent RSS"
+}
