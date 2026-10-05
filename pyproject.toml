@@ -5,13 +5,28 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dm-spikes"
 version = "0.1.0"
-description = "Scientific utilities for dark-matter density spike calculations."
+description = "Numerical and analytical dark-matter spikes with Eddington inversion and radial execution."
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "numpy",
     "scipy",
-    "matplotlib",
 ]
+
+[project.optional-dependencies]
+notebooks = [
+    "matplotlib",
+    "ipykernel",
+    "jupyterlab",
+]
+
+[project.scripts]
+dm-spikes-profiles = "dm_spikes.profile_cli:main"
+
+[project.urls]
+Repository = "https://github.com/MagneticFungi/DM-spikes"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["dm_spikes*"]
+namespaces = false
