@@ -1,203 +1,229 @@
 # DM-spikes
 
-Librería científica para calcular spikes de densidad de materia oscura alrededor
-de un agujero negro. El flujo numérico construye el potencial de una densidad
-inicial, obtiene su función de distribución isotrópica mediante la inversión de
-Eddington, conserva la acción radial y calcula la densidad final integrando el
-espacio de fases. La saturación por aniquilación se aplica de forma opcional.
-También incluye perfiles analíticos para una ley de potencia y una esfera
-pseudoisoterma.
+Librería Python para calcular la respuesta adiabática autoconsistente de un halo
+esférico al crecimiento de un agujero negro. El motor numérico sigue el ciclo
+del apéndice A de [MacMillan y Henriksen](https://arxiv.org/html/astro-ph/0201153v1#A1):
 
-El paquete requiere Python >= 3.10, NumPy y SciPy. Desde la raíz del repositorio,
-con el entorno Python deseado activo, se instala en modo editable con:
+1. Construye el potencial inicial `Phi_i` y la función de distribución
+   isotrópica `f_i(E)` mediante `make_initial_potential` y la inversión de
+   Eddington. Ambos permanecen fijos.
+2. Inicia `Phi_f = Phi_i - G*M_bh/r`.
+3. Calcula la acción radial en el potencial final actual y encuentra la energía
+   inicial con la misma acción y el mismo momento angular físico.
+4. Integra la DF deformada para obtener una nueva densidad.
+5. Vuelve a construir el potencial del halo **con `make_initial_potential`** y
+   suma una vez el término del agujero negro. Repite hasta que el cambio
+   fraccional de densidad sea menor que `rtol` en todos los radios.
+
+El valor predeterminado `rtol=1e-4` implementa una comparación relativa punto
+por punto, `max(abs(rho_new/rho_previous - 1)) < rtol`. El artículo no precisa
+la normalización de su cambio de densidad de `1e-4`. El ciclo no usa mezcla.
+Para `M_bh > 0`, la integral de densidad final comienza en
+`L_c = 2 c R_S = 4 G M_bh / c` en todas las iteraciones. La aniquilación se
+aplica después, de forma opcional.
+Si la captura da densidad cero, el cambio cero a cero cuenta como cero;
+cero a positivo cuenta como uno y obliga a continuar la iteración.
+
+## Instalación y unidades
+
+Se requiere Python 3.10 o posterior, NumPy y SciPy:
 
 ```sh
 python -m pip install -e .
 ```
 
-Para trabajar con los notebooks y sus gráficas, el extra `notebooks` añade
-Matplotlib, IPykernel y JupyterLab:
+Las unidades son pc, km/s, masas solares y `Msun/pc^3` para densidad. El
+potencial inicial no contiene al agujero negro. `finite_escape` fija el cero de
+potencial en infinito; `confining` requiere `r_ref` y fija allí el cero del
+potencial del halo. La DF inicial debe emplear el mismo cero que `Phi_i`.
 
-```sh
-python -m pip install -e ".[notebooks]"
-python -m jupyterlab
-```
-
-La estructura actual separa el paquete, los scripts de ejecución y los datos:
-
-```text
-DM-spikes/
-├── src/dm_spikes/                  # Librería instalable
-├── dm_spikes_execution.py          # Tres leyes de potencia y un NFW
-├── dm_spikes_execution2.py         # NFW hasta 1.20 Mpc
-├── execution.py                   # Script anterior de Gondolo–Silk
-├── df_inicial_ley_potencia.ipynb    # Comparación de la DF inicial
-├── perfiles_analiticos.ipynb        # Exploración de perfiles analíticos
-├── results/                       # Perfiles actuales en NPZ
-├── notebooks (old)/                # Notebooks anteriores
-├── results (old)/                  # Resultados locales anteriores y GIF
-├── results_servidor (old)/         # Resultados anteriores del servidor
-├── README.md
-└── pyproject.toml
-```
-
-Los módulos de `src/dm_spikes` tienen las siguientes responsabilidades:
-
-| Módulo | Función |
-| --- | --- |
-| [`__init__.py`](src/dm_spikes/__init__.py) | Reexporta las principales funciones científicas y analíticas. |
-| [`constants.py`](src/dm_spikes/constants.py) | Constantes gravitatorias `G` y `C_LIGHT`. |
-| [`density_models.py`](src/dm_spikes/density_models.py) | Factorías de densidades iniciales de ley de potencia, NFW y Hernquist, con derivadas radiales. |
-| [`initial_profile.py`](src/dm_spikes/initial_profile.py) | Potencial inicial esférico, sus derivadas y cachés de integrales. |
-| [`eddington.py`](src/dm_spikes/eddington.py) | Inversión isotrópica de Eddington para construir `f(E)`. |
-| [`adiabatic_map.py`](src/dm_spikes/adiabatic_map.py) | Puntos de retorno, acciones radiales y mapeo de la energía inicial por conservación de acción. |
-| [`final_profile.py`](src/dm_spikes/final_profile.py) | Distribución final y densidad integrada en un potencial kepleriano con corte por captura. |
-| [`annihilations.py`](src/dm_spikes/annihilations.py) | Saturación armónica de una densidad suministrada por aniquilación. |
-| [`power_law_profile.py`](src/dm_spikes/power_law_profile.py) | Perfil analítico de ley de potencia, series `J_gamma`, factor `g_gamma`, coeficientes y radios del spike y del núcleo. |
-| [`pseudo_isothermal_sphere.py`](src/dm_spikes/pseudo_isothermal_sphere.py) | Perfil analítico pseudoisotermo y radio de empalme. |
-| [`profile_jobs.py`](src/dm_spikes/profile_jobs.py) | Configuración JSON y ejecución serial o paralela por radios. |
-| [`profile_cli.py`](src/dm_spikes/profile_cli.py) | Interfaz de línea de comandos para manifiestos JSON. |
-
-La convención de unidades es pc, km/s y masas solares; las densidades se expresan
-en `Msun/pc^3`. El potencial inicial no incluye al agujero negro. Para usar
-`make_initial_potential` y `make_eddington_df`, la frontera `finite_escape` fija
-el potencial en cero en infinito; `confining` requiere `r_ref` y fija el potencial
-en cero allí. La DF y el mapeo deben compartir el mismo cero de energía.
-
-Los perfiles finales incluyen un corte por captura y se anulan para
-`r <= 4 R_S`, con `R_S = 2 G M_bh / c^2`. Para la saturación,
-`rho_spike` usa `rho_sat = m / (observable_sigma_v * bh_age)`; los parámetros
-deben tener unidades compatibles con la densidad, sin conversión automática.
-
-Las alternativas analíticas aceptan arrays de radios. Por ejemplo:
+## API numérica
 
 ```python
 import numpy as np
-from dm_spikes import cusp_profile, isothermal_profile, schwarzschild_radius
+from dm_spikes import solve_self_consistent
+from dm_spikes.density_models import hernquist
 
-M_bh = 4.0e6
-R_S = schwarzschild_radius(M_bh)
-radii = np.geomspace(4.001 * R_S, 1.0, 100)
-
-rho_cusp = cusp_profile(radii, M_bh, gamma=1.0, R_S=R_S)
-rho_isothermal = isothermal_profile(
-    radii, M_bh, sigma_v=100.0, rho0=0.0062, R_S=R_S
+rho_i = hernquist(total_mass=1.0, scale_radius=1.0)
+radii = np.geomspace(0.01, 100.0, 129)
+result = solve_self_consistent(
+    rho_i, radii, M_bh=0.01, G=1.0, boundary="finite_escape",
 )
+rho_final = result.density
+phi_final = result.potential
+rho_at_other_radius = result.density_profile(0.5)
 ```
 
-La ruta numérica se compone mediante `make_initial_potential`,
-`make_eddington_df` y `make_final_profile`. La inversión y el mapeo se evalúan
-directamente; calcular muchos radios puede ser costoso.
+`solve_self_consistent` acepta opcionalmente `initial_potential` e `initial_df`
+si ya se conocen. `result.history` registra el cambio máximo de densidad por
+iteración. Si se agota `max_iterations`,
+`SelfConsistentConvergenceError.result` conserva el último estado y
+`converged=False`. Con `iteration_callback=func`, la función recibe el estado
+completo después de cada actualización de Poisson. Con
+`return_on_max_iterations=True`, el límite devuelve ese último estado sin
+lanzar la excepción.
 
-Para organizar cálculos desde una configuración, `dm_spikes.profile_jobs` ofrece:
+`result.density` y `result.distribution` corresponden al potencial usado
+en esa iteración, disponible en `result.density_potential`.
+`result.potential` es la actualización de Poisson de esa densidad, incluido
+el agujero negro, y se usa en la siguiente iteración. Los trabajos JSON
+guardan ambos como `density_potential_grid` y `potential_grid`.
+El campo `potential` del NPZ final conserva la actualización de Poisson.
 
-- `run_profile(config)`: un perfil en el proceso actual.
-- `run_profiles(configs)`: varios perfiles en orden, con ejecución serial por defecto.
-- `run_profile_radial(config, max_workers=...)`: un perfil numérico con radios repartidos entre procesos.
-- `iter_profiles_radial(configs, max_workers=...)`: entrega un perfil numérico terminado antes de iniciar el siguiente.
+`find_turning_points`, `radial_action`, `solve_initial_energy`,
+`make_final_distribution`, `rho_prime_at_r` y `make_final_profile` trabajan con
+el **potencial final suministrado**, que incluye halo y agujero negro. La
+integral final admite las fronteras `finite_escape` y `confining`. No queda un
+motor numérico final limitado al potencial kepleriano.
 
-Los motores disponibles son `numerical`, `analytic_power_law` y
-`analytic_isothermal`. El modo radial exige el motor `numerical`; las
-alternativas analíticas usan la ruta serial vectorizada. El backend por perfiles
-completos ya no forma parte de la API: `run_profiles` acepta `serial` y `radial`.
+Con captura, la integral de densidad a radio `r` usa
+`L' in [L_c, r*sqrt(2*(E'-Phi_f(r)))]`. En `finite_escape` integra
+`E' in [Phi_f(r)+L_c^2/(2*r^2), 0]`; si el límite inferior es al menos
+cero, la densidad es cero. En `confining`, el límite superior es infinito.
+En la iteración `k`, esta energía mínima es
+`E'_min^(k)(r) = Phi_DM^(k)(r) - G*M_bh/r * (1 - 4*R_S/r)`:
+el potencial del halo cambia y `L_c` permanece fijo.
+La acción radial y la DF inicial permanecen sin cambio; la restricción actúa
+solo como límite de la integral final. `solve_self_consistent` y los trabajos
+numéricos fijan `L_c` a partir de la masa del agujero negro, con `clight`
+configurable. Si se construye un potencial final propio, `make_final_profile`
+y `rho_prime_at_r` aceptan `capture_angular_momentum=L_c` explícitamente.
 
-La CLI recibe un objeto JSON o una lista de objetos. Guarda, por ejemplo, este
-manifiesto numérico en un archivo propio llamado `profiles.json`:
+El potencial de Poisson necesita una densidad en todos los radios positivos.
+Entre puntos de la malla, el ciclo interpola suavemente el logaritmo de
+`rho_final/rho_inicial` en `log(r)`. Fuera de la malla mantiene constante el
+cociente del extremo correspondiente. Si hay valores nulos por captura,
+interpola el cociente directamente para admitir ceros sin tomar su logaritmo.
+Estas son condiciones de frontera de
+la representación finita; un perfil sin perturbación reproduce exactamente
+la densidad inicial. Para estimar el error de discretización, se deben
+comparar cálculos con dominios y resoluciones radiales distintos. La ruta
+directa puede ser costosa porque anida cuadraturas y búsquedas de raíces. Las
+integrales angular y, para `finite_escape`, de energía usan reglas de Gauss
+sucesivas; aceptan el resultado cuando dos órdenes consecutivos concuerdan
+dentro de la tolerancia indicada.
+
+Para cálculos NFW y Hernquist extensos, la configuración opcional `tabulation` acelera
+este mismo ciclo. La DF inicial se tabula una vez en energía y se valida en
+los puntos medios de cada intervalo; fuera de la tabla se evalúa directamente.
+También se tabula una vez la relación inversa `E_i(I_r,L)`. Cada consulta
+interpolada se comprueba calculando directamente la acción radial inicial;
+si no conserva la acción dentro de la tolerancia, se usa el solucionador
+directo. Los potenciales iniciales NFW y Hernquist se evalúan con sus fórmulas
+analíticas, incluidas sus derivadas y diferencias respecto del centro. Después
+de cada actualización de Poisson, el potencial del halo se interpola en radio
+logarítmico; la tabla se sustituye en la siguiente iteración. Las regiones
+donde la precisión de los valores del potencial no permite certificar la
+interpolación se evalúan directamente. La acción final sigue calculándose
+para el potencial vigente, que cambia entre iteraciones.
+
+Para energías iniciales próximas al centro del NFW o Hernquist, el mapa busca y comprueba
+la solución en `E - Phi_i(0)`, usando la diferencia analítica del potencial.
+Así, la búsqueda de raíces no redondea cada ensayo a la escala mucho mayor
+de `Phi_i(0)`. Cerca del escape se conserva la energía absoluta. Al devolver
+la energía para evaluar la DF, se restituye su cero original; esa conversión
+a un único `float64` puede limitar la precisión si después se vuelve a
+calcular una acción casi circular a partir del escalar devuelto.
+
+Con `max_workers=N`, las evaluaciones independientes de la DF inicial y de
+la tabla inversa de acciones también se distribuyen entre procesos. La DF
+se refina por lotes de muestras nuevas; los valores ya calculados se reutilizan.
+La tabla de acciones se ensambla en el orden de su malla, independientemente
+del orden en que terminen las tareas. El pool de preparación se cierra antes
+de abrir el pool de radios, por lo que ambos no compiten simultáneamente.
+El número de tareas disponibles puede ser menor que `N` (el primer lote de
+DF tiene 33 muestras). El refinamiento de interpoladores y la actualización
+de Poisson siguen en el proceso principal.
+
+`run_profile(..., on_progress=callback)` informa de las etapas y del número
+de muestras iniciales completadas. Los scripts `dm_spikes_execution3.py` y
+`dm_spikes_execution4.py` imprimen esos mensajes, además de los NPZ guardados
+por iteración. Hernquist conserva su potencial inicial analítico durante el
+mapa adiabático; el halo actualizado se obtiene numéricamente mediante Poisson.
+
+## CLI y scripts
+
+Un manifiesto JSON numérico puede contener:
 
 ```json
-[
-  {
-    "id": "halo-nfw",
-    "engine": "numerical",
-    "M_bh": 4000000.0,
-    "radii": [0.001, 0.01, 0.1],
-    "density": {
-      "factory": "dm_spikes.density_models:nfw",
-      "parameters": {"rho_s": 0.004, "r_s": 20000.0}
-    },
-    "boundary": "finite_escape",
-    "density_derivatives": true,
-    "potential_derivatives": true
-  }
-]
+{
+  "id": "halo-nfw",
+  "engine": "numerical",
+  "M_bh": 4000000.0,
+  "radii": [0.001, 0.01, 0.1],
+  "density": {
+    "factory": "dm_spikes.density_models:nfw",
+    "parameters": {"rho_s": 0.004, "r_s": 20000.0}
+  },
+  "boundary": "finite_escape",
+  "tabulation": {"initial_df_rtol": 0.000001, "initial_action": true,
+                  "final_potential": true, "potential_rtol": 0.0000001},
+  "solver": {"rtol": 0.0001, "max_iterations": 100}
+}
 ```
-
-`density.factory` identifica una factoría importable como `module:factory` que
-devuelve una densidad escalar. Las otras factorías incluidas son `power_law`
-(`rho0`, `r0`, `gamma`) y `hernquist` (`total_mass`, `scale_radius`). Los radios
-y parámetros del manifiesto son datos JSON; no se pasan funciones ni arrays
-NumPy entre procesos. Los IDs de un lote deben ser únicos.
-
-Para motores analíticos, se omiten `density`, `boundary` y las opciones de
-derivadas, y se usa `parameters`: `gamma` para `analytic_power_law`, o `rho0` y
-`sigma_v` para `analytic_isothermal`. Opcionalmente, `annihilation` recibe `m`,
-`observable_sigma_v` y `bh_age`.
-
-Con ese manifiesto, las formas de ejecución son:
 
 ```sh
-python -m dm_spikes.profile_cli profiles.json --output serial.json
-python -m dm_spikes.profile_cli profiles.json --workers 2 --output-dir resultados
-python -m dm_spikes.profile_cli profiles.json --id halo-nfw --workers 2 --output nfw.json
+python -m dm_spikes.profile_cli profiles.json --workers <N> --output profile.json
 ```
 
-La instalación también registra el comando equivalente `dm-spikes-profiles`:
+`solver.radial_grid` puede especificar una malla más amplia o fina que los
+radios de salida; debe contenerlos. `--workers N` indica el número máximo de
+procesos CPU que tú asignas al perfil actual; no se deduce ni se fija a partir
+del servidor. Si se omite, el cálculo es serial. Los procesos calculan grupos
+independientes de radios con el potencial fijo de una iteración. El programa
+espera a recibir **todos** los radios, comprueba la convergencia y resuelve
+Poisson antes de iniciar la siguiente iteración. En un lote, termina un perfil
+antes de comenzar el siguiente. `--block-size` controla cuántos radios recibe
+cada tarea (por defecto, 1) y `--inner-threads` controla los hilos de bibliotecas
+numéricas por proceso (por defecto, 1). Las mismas opciones están disponibles
+en `run_profile(..., max_workers=N, block_size=1, inner_threads=1)` y en ambos
+scripts de ejecución. `run_profile_radial` e `iter_profiles_radial` conservan
+la interfaz anterior; el iterador entrega cada perfil terminado antes de
+iniciar el siguiente. El backend usa CPU; las GPU no participan.
 
 ```sh
-dm-spikes-profiles profiles.json --output serial.json
+python dm_spikes_execution.py --workers <N> --block-size 2
+python dm_spikes_execution2.py --workers <N> --block-size 2
 ```
 
-Los archivos de salida deben ser nuevos. `--workers` activa el modo radial,
-`--block-size` indica cuántos radios recibe cada tarea y `--inner-threads` limita
-los hilos de las bibliotecas numéricas en cada proceso. Cada worker construye
-una vez su cadena de cálculo y reutiliza sus funciones y cachés. Se usa `spawn`
-y el número de workers debe indicarse explícitamente. Los resultados conservan
-el orden de entrada e incluyen configuración, radios, `rho_prime`, información
-de ejecución y, si se solicita saturación, `rho_spike`.
+En un servidor con 2 nodos NUMA conviene medir distintos valores de `N` y de
+`block-size`; el número de hilos lógicos no implica una aceleración lineal.
+Cada worker mantiene su propio potencial y DF iniciales en memoria. La
+comunicación entre procesos envía bloques y mallas pequeños y no crea archivos
+temporales de perfiles. El resultado registra los procesos utilizados en
+`parallel.worker_pids`. `--output-dir` guarda los perfiles de un lote uno por
+uno. Sustituye `<N>` por el número de procesos que deseas usar. En scripts
+Python propios, llama al backend paralelo desde `if __name__ == "__main__":`
+porque los procesos se crean con `spawn`. Los motores `analytic_power_law` y
+`analytic_isothermal` siguen disponibles como
+referencias analíticas.
 
-`--output-dir` guarda cada perfil terminado antes de iniciar el siguiente. Para
-usar el modo radial desde Python, las llamadas deben estar dentro de
-`if __name__ == "__main__":` en un script importable. Desde notebooks se puede
-invocar la CLI.
+`dm_spikes_execution.py` calcula tres leyes de potencia y NFW;
+`dm_spikes_execution2.py` calcula NFW hasta 1.20 Mpc. Ambos usan el ciclo
+autoconsistente y guardan NPZ en `results/`. Las carpetas `(old)` y los NPZ
+existentes son resultados previos; no se recalcularon al cambiar el motor.
 
-Los dos scripts de cálculo actuales construyen potenciales específicos de los
-modelos con sus derivadas explícitas y usan la inversión numérica de Eddington,
-el mapeo adiabático y la integral final:
+`dm_spikes_execution3.py` calcula un NFW con `r_s=20000 pc`,
+`rho_s=0.003568 Msun/pc^3` y `M_bh=2.6e6 Msun`, desde `4.001 R_S` hasta
+`380 Mpc`. Activa las tablas de DF y acción iniciales y la tabla de potencial
+del halo actualizada por iteración. Acepta `--workers N` y guarda un perfil completo por iteración
+(`nfw_380mpc_iter_001.npz`, `nfw_380mpc_iter_002.npz`, etc.) en una carpeta
+nueva de `results/` o en `--output-dir`. Cada NPZ incluye radios, densidad,
+historial, cambio relativo, estado de convergencia y tiempo transcurrido.
+Se detiene al converger o al completar como máximo 100 iteraciones. En ambos
+casos también escribe `nfw_380mpc.npz` con el último perfil y potencial;
+`converged=False` indica que se alcanzó el límite sin converger. Los NPZ de
+iteraciones se guardan al terminar todos los radios y la actualización de
+Poisson correspondiente.
+
+Para reproducir resultados con la librería anterior al ciclo autoconsistente,
+`dm_spikes_execution2_legacy.py` conserva el cálculo NFW previo de 1.20 Mpc.
+Debe ejecutarse con esa versión antigua instalada; su salida es `nfw.npz`.
+
+## Pruebas
 
 ```sh
-python dm_spikes_execution.py --workers 2
-python dm_spikes_execution2.py --workers 2
+python -m pip install -e ".[test]"
+python -m pytest tests -m "not slow"
+python -m pytest tests -m slow
 ```
-
-- `dm_spikes_execution.py` calcula leyes de potencia con `gamma = 1.0`, `0.5`
-  y `1.5`, y un NFW. Usa 300 radios por perfil, desde `4.001 R_S` hasta el radio
-  del spike; el NFW usa el extremo del caso `gamma = 1.0`.
-- `dm_spikes_execution2.py` calcula un NFW con 300 radios desde `4.001 R_S`
-  hasta `1.20 Mpc`.
-
-Ambos admiten `--workers`, `--block-size`, `--m-bh`, `--nfw-rs`, `--epsrel` y
-`--output-dir`. Por defecto usan dos workers, bloques de un radio,
-`M_bh = 4e6 Msun`, escala NFW de `20000 pc` y `epsrel = 1e-3` para la integral
-final. Crean una carpeta nueva con fecha y hora dentro de `results/`, o usan una
-ruta nueva indicada por `--output-dir`. Guardan cada perfil terminado en un NPZ
-con radios, densidad, parámetros, unidades y tiempo de cálculo. Los radios se
-reparten entre procesos; los perfiles se calculan en orden.
-
-`results/` contiene actualmente `nfw.npz`, `power_law_gamma_1.npz`,
-`power_law_gamma_0p5.npz` y `power_law_gamma_1p5.npz`. Se pueden leer con NumPy:
-
-```python
-with np.load("results/nfw.npz", allow_pickle=False) as data:
-    radii = data["radii"]
-    rho_prime = data["rho_prime"]
-```
-
-Los notebooks activos son [df_inicial_ley_potencia.ipynb](df_inicial_ley_potencia.ipynb),
-que compara la DF analítica de una ley de potencia con la inversión de Eddington,
-y [perfiles_analiticos.ipynb](perfiles_analiticos.ipynb), que explora los perfiles
-analíticos y sus coeficientes. Las carpetas `(old)` conservan trabajo anterior;
-varios de esos notebooks requieren adaptar llamadas a la API actual y rutas de
-datos. `execution.py` conserva su flujo propio de Gondolo–Silk.
-
-El árbol actual no contiene una carpeta `tests/` ni una suite de pruebas
-automatizadas incluida en el repositorio.

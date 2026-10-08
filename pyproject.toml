@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dm-spikes"
 version = "0.1.0"
-description = "Numerical and analytical dark-matter spikes with Eddington inversion and radial execution."
+description = "Self-consistent adiabatic dark-matter spikes with Eddington inversion."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -14,6 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+test = ["pytest>=7"]
 notebooks = [
     "matplotlib",
     "ipykernel",
@@ -30,3 +31,6 @@ Repository = "https://github.com/MagneticFungi/DM-spikes"
 where = ["src"]
 include = ["dm_spikes*"]
 namespaces = false
+
+[tool.pytest.ini_options]
+markers = ["slow: computationally expensive scientific validation"]

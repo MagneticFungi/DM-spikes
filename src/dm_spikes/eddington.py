@@ -16,12 +16,108 @@ from collections.abc import Callable
 
 import numpy as np
 from scipy.integrate import IntegrationWarning, quad
+from scipy.interpolate import PchipInterpolator
 from scipy.optimize import brentq
+from scipy.special import expit
 
 
 _LOG_MIN = math.log(np.finfo(float).tiny) + 0.02
 _LOG_MAX = math.log(np.finfo(float).max) - 0.02
 _COEFFICIENT = 1.0 / (math.sqrt(8.0) * math.pi**2)
+
+
+class TabulatedEddingtonDF:
+    """Interpolate a fixed finite-escape DF; use the direct DF beyond the table."""
+
+    def __init__(self, central_potential, logit_nodes, log_values, direct,
+                 max_validation_error=0.0):
+        self.binding_scale = -float(central_potential)
+        self.logit_nodes = np.asarray(logit_nodes, dtype=float)
+        self.log_values = np.asarray(log_values, dtype=float)
+        if (not math.isfinite(self.binding_scale) or self.binding_scale <= 0.0
+                or self.logit_nodes.ndim != 1 or len(self.logit_nodes) < 3
+                or np.any(np.diff(self.logit_nodes) <= 0.0)
+                or not np.all(np.isfinite(self.log_values))
+                or self.log_values.shape != self.logit_nodes.shape
+                or not callable(direct)):
+            raise ValueError("invalid finite-escape DF table")
+        self.direct = direct
+        self.max_validation_error = float(max_validation_error)
+        self._interpolator = PchipInterpolator(self.logit_nodes, self.log_values)
+
+    def __call__(self, energy):
+        energy = float(energy)
+        if not math.isfinite(energy):
+            raise ValueError("energy must be finite")
+        binding = -energy / self.binding_scale
+        if not 0.0 < binding < 1.0:
+            return self.direct(energy)
+        coordinate = math.log(binding) - math.log1p(-binding)
+        if not self.logit_nodes[0] <= coordinate <= self.logit_nodes[-1]:
+            return self.direct(energy)
+        return math.exp(float(self._interpolator(coordinate)))
+
+
+def tabulate_eddington_df(direct, central_potential, *, rtol=1e-6,
+                          max_points=2049, logit_range=20.0,
+                          _sample_evaluator=None):
+    """Build a midpoint-validated log-DF table for a fixed initial halo.
+
+    Interpolation is checked at every cell midpoint. This is a local error
+    diagnostic, not a global proof; callers can compare further direct samples.
+    """
+    if not callable(direct):
+        raise TypeError("direct DF must be callable")
+    if _sample_evaluator is not None and not callable(_sample_evaluator):
+        raise TypeError("DF sample evaluator must be callable")
+    if not math.isfinite(rtol) or not 0.0 < rtol < 0.01:
+        raise ValueError("rtol must lie between zero and 0.01")
+    if type(max_points) is not int or max_points < 33:
+        raise ValueError("max_points must be at least 33")
+    if not math.isfinite(logit_range) or not 0.0 < logit_range <= 30.0:
+        raise ValueError("logit_range must lie between zero and 30")
+    scale = -float(central_potential)
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError("central_potential must be negative and finite")
+
+    samples = {}
+
+    def log_samples(coordinates):
+        # Refinement remains in the parent; only independent direct DF
+        # evaluations are dispatched. Reuse nodes from earlier rounds.
+        missing = list(dict.fromkeys(
+            float(coordinate) for coordinate in coordinates
+            if float(coordinate) not in samples
+        ))
+        if missing:
+            energies = [-scale * float(expit(coordinate)) for coordinate in missing]
+            values = np.asarray(
+                [direct(energy) for energy in energies] if _sample_evaluator is None
+                else _sample_evaluator(energies), dtype=float,
+            )
+            if (values.shape != (len(missing),) or not np.all(np.isfinite(values))
+                    or np.any(values <= 0.0)):
+                raise ArithmeticError("initial DF must be positive and finite on the table")
+            samples.update((coordinate, math.log(float(value)))
+                           for coordinate, value in zip(missing, values))
+        return np.array([samples[float(coordinate)] for coordinate in coordinates])
+
+    nodes = np.linspace(-logit_range, logit_range, 33)
+    values = log_samples(nodes)
+    while True:
+        interpolator = PchipInterpolator(nodes, values)
+        midpoints = 0.5 * (nodes[:-1] + nodes[1:])
+        midpoint_values = log_samples(midpoints)
+        errors = np.abs(np.expm1(np.asarray(interpolator(midpoints)) - midpoint_values))
+        refine = errors > rtol
+        if not np.any(refine):
+            return TabulatedEddingtonDF(
+                central_potential, nodes, values, direct, float(np.max(errors)),
+            )
+        if len(nodes) + int(np.count_nonzero(refine)) > max_points:
+            raise ArithmeticError("initial DF table did not meet its interpolation tolerance")
+        nodes = np.sort(np.r_[nodes, midpoints[refine]])
+        values = log_samples(nodes)
 
 
 def make_eddington_df(

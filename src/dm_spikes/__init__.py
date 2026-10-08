@@ -2,7 +2,6 @@ from .adiabatic_map import (
     effective_potential,
     find_turning_points,
     radial_action,
-    radial_action_final_kepler,
     solve_initial_energy,
 )
 from .annihilations import rho_spike
@@ -13,6 +12,9 @@ from .final_profile import (
     rho_prime_at_r,
     rho_prime_profile,
     schwarzschild_radius,
+    solve_self_consistent,
+    SelfConsistentResult,
+    SelfConsistentConvergenceError,
 )
 from .initial_profile import make_initial_potential
 from .power_law_profile import (
@@ -41,8 +43,10 @@ __all__ = [
     "effective_potential",
     "find_turning_points",
     "radial_action",
-    "radial_action_final_kepler",
     "solve_initial_energy",
+    "solve_self_consistent",
+    "SelfConsistentResult",
+    "SelfConsistentConvergenceError",
     "make_eddington_df",
     "make_initial_potential",
     "rho_spike",

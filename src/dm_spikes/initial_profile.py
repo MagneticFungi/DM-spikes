@@ -15,12 +15,13 @@ from __future__ import annotations
 
 import math
 import warnings
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable
 from functools import lru_cache
 
 import numpy as np
 from scipy.integrate import IntegrationWarning, quad
+from scipy.interpolate import CubicHermiteSpline
 
 from .constants import G as DEFAULT_G
 
@@ -30,6 +31,7 @@ _LOG_MIN = math.log(np.finfo(float).tiny) + 0.02
 _QUAD_RTOL = 2e-9
 _TAIL_RTOL = 1e-8
 _MIN_TAIL_LOG_SPAN = 64.0
+_MAX_TAIL_LOG_STEP = 32.0
 _MASS_TAIL_RTOL = 2e-10
 _MASS_LOG_STEP = 2.0
 _MASS_MIN_LOG_SPAN = 64.0
@@ -50,6 +52,8 @@ def _positive_radius(value: float) -> float:
 class _InitialPotential:
     """Callable potential with first and second radial derivatives."""
 
+    radial_center_allowed = True
+
     def __init__(
         self,
         density: Callable[[float], float],
@@ -61,10 +65,22 @@ class _InitialPotential:
         self._boundary = boundary
         self._G = gravitational_constant
         self._r_ref = reference_radius
+        # A represented density is smooth within each interpolation interval.
+        # Share its knots with every Poisson quadrature, including direct
+        # evaluations outside the potential table in a fresh radial worker.
+        self._density_breakpoints = tuple(sorted({
+            _positive_radius(radius)
+            for radius in getattr(density, "integration_breakpoints", ())
+        }))
+        self._log_density_breakpoints = tuple(
+            math.log(radius) for radius in self._density_breakpoints
+        )
         self._mass = lru_cache(maxsize=4096)(self._mass_uncached)
         self._outer_shell = lru_cache(maxsize=2048)(self._outer_shell_uncached)
         self._mass_anchor_radii: list[float] = []
         self._mass_anchor_values: list[float] = []
+        self._shell_anchor_radii: list[float] = []
+        self._shell_anchor_values: list[float] = []
         self._m_ref = self._mass_direct(reference_radius) if reference_radius is not None else None
         if reference_radius is not None:
             self._remember_mass(reference_radius, self._m_ref)
@@ -81,18 +97,52 @@ class _InitialPotential:
         return value
 
     @staticmethod
-    def _integrate(integrand: Callable[[float], float], a: float, b: float, name: str) -> float:
+    def _integrate(
+        integrand: Callable[[float], float], a: float, b: float, name: str,
+        *, breakpoints: tuple[float, ...] = (),
+    ) -> float:
+        """Integrate separately on pieces delimited by sorted breakpoints."""
+        if a == b:
+            return 0.0
+        if b < a:
+            return -_InitialPotential._integrate(
+                integrand, b, a, name, breakpoints=breakpoints,
+            )
+        start = bisect_right(breakpoints, a)
+        stop = bisect_left(breakpoints, b)
+        edges = (a, *breakpoints[start:stop], b)
+        terms = []
         with warnings.catch_warnings():
             warnings.simplefilter("error", IntegrationWarning)
-            try:
-                value, error = quad(integrand, a, b, epsabs=0.0, epsrel=_QUAD_RTOL, limit=200)
-            except IntegrationWarning as exc:
-                raise ArithmeticError(f"{name} did not converge") from exc
-        if not (math.isfinite(value) and math.isfinite(error)):
-            raise ArithmeticError(f"{name} returned a non-finite value or error estimate")
-        if error > 1e-7 * abs(value):
-            raise ArithmeticError(f"{name} has an unresolved quadrature error")
-        return value
+            for left, right in zip(edges[:-1], edges[1:]):
+                if left == right:
+                    continue
+                try:
+                    value, error = quad(
+                        integrand, left, right, epsabs=0.0, epsrel=_QUAD_RTOL, limit=200,
+                    )
+                except IntegrationWarning as exc:
+                    raise ArithmeticError(
+                        f"{name} did not converge on integration coordinates "
+                        f"[{left:.17g}, {right:.17g}]: {exc}"
+                    ) from exc
+                if not (math.isfinite(value) and math.isfinite(error)):
+                    raise ArithmeticError(f"{name} returned a non-finite value or error estimate")
+                if error > 1e-7 * abs(value):
+                    raise ArithmeticError(f"{name} has an unresolved quadrature error")
+                terms.append(value)
+        return math.fsum(terms)
+
+    def _unit_density_breakpoints(self, a: float, b: float) -> tuple[float, ...]:
+        """Density knots mapped onto t in [0, 1], where r = a + (b-a)*t."""
+        if a == b:
+            return ()
+        start = bisect_right(self._density_breakpoints, min(a, b))
+        stop = bisect_left(self._density_breakpoints, max(a, b))
+        knots = self._density_breakpoints[start:stop]
+        if b < a:
+            knots = knots[::-1]
+        return tuple((radius - a) / (b - a) for radius in knots)
 
     def _log_mass_moment(self, a: float, b: float) -> float:
         """Positive integral of s² rho(s) ds, with bounded log-radius panels."""
@@ -110,6 +160,7 @@ class _InitialPotential:
             self._integrate(
                 integrand, log_a + index * width, log_a + (index + 1) * width,
                 "enclosed mass shell",
+                breakpoints=self._log_density_breakpoints,
             )
             for index in range(count)
         )
@@ -165,6 +216,7 @@ class _InitialPotential:
         return delta * self._integrate(
             lambda t: (a + delta * t) ** power * self._rho(a + delta * t),
             0.0, 1.0, "local density moment",
+            breakpoints=self._unit_density_breakpoints(a, b),
         )
 
     def _mass_uncached(self, radius: float) -> float:
@@ -175,10 +227,15 @@ class _InitialPotential:
         else:
             index = bisect_left(self._mass_anchor_radii, radius)
             if index and radius / self._mass_anchor_radii[index - 1] <= math.exp(4.0):
+                anchor = self._mass_anchor_radii[index - 1]
                 result = self._mass_anchor_values[index - 1]
-                result += 4.0 * math.pi * self._log_mass_moment(
-                    self._mass_anchor_radii[index - 1], radius
-                )
+                # Log-radius endpoints can differ by only a few ulps during
+                # a turning-point solve. Integrate that short interval on
+                # [0, 1] to retain its width and avoid QUADPACK roundoff.
+                moment = (self._local_moment(anchor, radius, 2)
+                          if radius / anchor <= 2.0 else
+                          self._log_mass_moment(anchor, radius))
+                result += 4.0 * math.pi * moment
             else:
                 result = self._mass_direct(radius)
         if not math.isfinite(result) or result < 0.0:
@@ -202,12 +259,50 @@ class _InitialPotential:
             self._integrate(
                 integrand, log_a + index * width, log_a + (index + 1) * width,
                 "density shell integral",
+                breakpoints=self._log_density_breakpoints,
             )
             for index in range(count)
         ]
         return math.fsum(terms)
 
+    def _remember_shell(self, radius: float, shell: float) -> None:
+        index = bisect_left(self._shell_anchor_radii, radius)
+        if index < len(self._shell_anchor_radii) and self._shell_anchor_radii[index] == radius:
+            return
+        self._shell_anchor_radii.insert(index, radius)
+        self._shell_anchor_values.insert(index, shell)
+        if len(self._shell_anchor_radii) > 2048:
+            del self._shell_anchor_radii[0]
+            del self._shell_anchor_values[0]
+
     def _outer_shell_uncached(self, radius: float) -> float:
+        """Reuse a neighboring shell integral and integrate only between radii."""
+        index = bisect_left(self._shell_anchor_radii, radius)
+
+        def between(a: float, b: float) -> float:
+            return (self._local_moment(a, b, 1) if b / a <= 2.0
+                    else self._log_moment(a, b))
+
+        if index < len(self._shell_anchor_radii):
+            anchor = self._shell_anchor_radii[index]
+            if anchor / radius <= math.exp(4.0):
+                value = self._shell_anchor_values[index] + between(radius, anchor)
+                self._remember_shell(radius, value)
+                return value
+        if index:
+            anchor = self._shell_anchor_radii[index - 1]
+            if radius / anchor <= math.exp(4.0):
+                anchor_value = self._shell_anchor_values[index - 1]
+                value = anchor_value - between(anchor, radius)
+                if value > 1e-10 * anchor_value:
+                    self._remember_shell(radius, value)
+                    return value
+
+        value = self._outer_shell_direct(radius)
+        self._remember_shell(radius, value)
+        return value
+
+    def _outer_shell_direct(self, radius: float) -> float:
         """Integral from r to infinity of s*rho(s), with a surveyed tail."""
         log_radius = math.log(radius)
         max_span = _LOG_MAX - log_radius - 0.01
@@ -218,8 +313,13 @@ class _InitialPotential:
         previous_contribution = None
         small_segments = 0
         last_span = 0.0
-        for index in range(12):
-            next_span = min(float(2**index), max_span)
+        for index in range(64):
+            # Check the tail frequently after the initial geometric survey.
+            # Doubling a span from 128 to 256 log units can drive an already
+            # negligible NFW shell below float64 resolution before the second
+            # small-segment check has a chance to stop the survey.
+            next_span = min(float(2**index), previous_span + _MAX_TAIL_LOG_STEP,
+                            max_span)
             if next_span <= previous_span:
                 break
             contribution = self._log_moment(
@@ -273,6 +373,7 @@ class _InitialPotential:
                     lambda t: (reference + delta * t) * (1.0 - t)
                     * self._rho(reference + delta * t),
                     0.0, 1.0, "local potential shell integral",
+                    breakpoints=self._unit_density_breakpoints(reference, radius),
                 )
                 value = self._G * self._m_ref * delta / (radius * reference)
                 value += 4.0 * math.pi * self._G * delta * delta * shell / radius
@@ -319,7 +420,8 @@ class _InitialPotential:
 
             try:
                 contrast_integral = self._integrate(
-                    contrast, 0.0, 1.0, "second derivative contrast"
+                    contrast, 0.0, 1.0, "second derivative contrast",
+                    breakpoints=self._unit_density_breakpoints(0.0, radius),
                 )
             except ArithmeticError as exc:
                 raise ArithmeticError(
@@ -356,6 +458,10 @@ def make_initial_potential(
     scalar radii. The potential also exposes ``prime`` and ``second`` for
     derivative-aware Eddington inversion.
 
+    A piecewise density can expose ``integration_breakpoints``, a sequence
+    of positive finite radii. All density quadratures are split at those
+    radii so an adaptive integral never has to discover interpolation knots.
+
     The quadrature error estimate excludes error in ``density`` itself and
     cannot certify that an unobserved remote feature is absent. The inward
     mass survey likewise cannot rule out an arbitrarily narrow or distant
@@ -387,4 +493,104 @@ def make_initial_potential(
     return result
 
 
-__all__ = ["make_initial_potential"]
+class TabulatedPotential:
+    """Hermite table in log radius, with the direct Poisson potential outside."""
+
+    def __init__(self, direct, log_radii, values, log_slopes, unsafe_intervals=None):
+        self.direct = direct
+        self.log_radii = np.asarray(log_radii, dtype=float)
+        self.values = np.asarray(values, dtype=float)
+        self.log_slopes = np.asarray(log_slopes, dtype=float)
+        self.unsafe_intervals = (np.zeros(len(self.log_radii) - 1, dtype=bool)
+                                 if unsafe_intervals is None else
+                                 np.asarray(unsafe_intervals, dtype=bool))
+        if (not callable(direct) or not callable(getattr(direct, "prime", None))
+                or len(self.log_radii) < 3 or np.any(np.diff(self.log_radii) <= 0.0)
+                or self.values.shape != self.log_radii.shape
+                or self.log_slopes.shape != self.log_radii.shape
+                or self.unsafe_intervals.shape != (len(self.log_radii) - 1,)
+                or not np.all(np.isfinite(self.values))
+                or not np.all(np.isfinite(self.log_slopes))):
+            raise ValueError("invalid potential table")
+        self._interpolator = CubicHermiteSpline(
+            self.log_radii, self.values, self.log_slopes,
+        )
+        self.radial_center_allowed = getattr(direct, "radial_center_allowed", False)
+
+    def _coordinate(self, radius):
+        return math.log(_positive_radius(radius))
+
+    def __call__(self, radius):
+        coordinate = self._coordinate(radius)
+        if self.log_radii[0] <= coordinate <= self.log_radii[-1]:
+            index = min(np.searchsorted(self.log_radii, coordinate, side="right") - 1,
+                        len(self.unsafe_intervals) - 1)
+            if not self.unsafe_intervals[index]:
+                return float(self._interpolator(coordinate))
+        return float(self.direct(radius))
+
+    def prime(self, radius):
+        # Differentiating nearly constant values of a deep central potential
+        # loses digits; the mass-based direct derivative remains well resolved.
+        return float(self.direct.prime(radius))
+
+    def second(self, radius):
+        return float(self.direct.second(radius))
+
+    def table_data(self):
+        return (self.log_radii, self.values, self.log_slopes, self.unsafe_intervals)
+
+
+def tabulate_potential(direct, minimum_radius, maximum_radius, *,
+                       rtol=1e-7, max_points=4097):
+    """Sample a halo potential and validate values at interval midpoints."""
+    minimum_radius = _positive_radius(minimum_radius)
+    maximum_radius = _positive_radius(maximum_radius)
+    if maximum_radius <= minimum_radius:
+        raise ValueError("potential table radii must increase")
+    if not math.isfinite(rtol) or not 0.0 < rtol < 0.01:
+        raise ValueError("rtol must lie between zero and 0.01")
+    if type(max_points) is not int or max_points < 3:
+        raise ValueError("max_points must be at least three")
+    span = math.log(maximum_radius / minimum_radius)
+    count = max(3, math.ceil(span / 0.5) + 1)
+    if count > max_points:
+        raise ValueError("potential table domain exceeds max_points")
+    nodes = np.linspace(math.log(minimum_radius), math.log(maximum_radius), count)
+
+    @lru_cache(maxsize=None)
+    def sample(coordinate):
+        radius = math.exp(coordinate)
+        value = float(direct(radius))
+        slope = radius * float(direct.prime(radius))
+        if not math.isfinite(value) or not math.isfinite(slope) or slope < 0.0:
+            raise ArithmeticError("potential table requires finite nondecreasing potential")
+        return value, slope
+
+    while True:
+        values = np.array([sample(float(node))[0] for node in nodes])
+        slopes = np.array([sample(float(node))[1] for node in nodes])
+        table = TabulatedPotential(direct, nodes, values, slopes)
+        midpoints = 0.5 * (nodes[:-1] + nodes[1:])
+        refine = []
+        unsafe = []
+        for midpoint in midpoints:
+            exact, exact_slope = sample(float(midpoint))
+            interpolated = float(table._interpolator(midpoint))
+            # Near a finite central potential, the local energy scale is much
+            # smaller than |Phi|. Keep an absolute float64 roundoff floor.
+            scale = max(abs(exact_slope), 1e-9 * abs(exact))
+            desired = rtol * scale
+            roundoff_floor = 64.0 * np.finfo(float).eps * abs(exact)
+            unsafe.append(roundoff_floor > desired)
+            refine.append(roundoff_floor <= desired and
+                          abs(interpolated - exact) > desired)
+        refine = np.asarray(refine, dtype=bool)
+        if not np.any(refine):
+            return TabulatedPotential(direct, nodes, values, slopes, unsafe)
+        if len(nodes) + int(np.count_nonzero(refine)) > max_points:
+            raise ArithmeticError("halo potential table did not meet its interpolation tolerance")
+        nodes = np.sort(np.r_[nodes, midpoints[refine]])
+
+
+__all__ = ["make_initial_potential", "TabulatedPotential", "tabulate_potential"]

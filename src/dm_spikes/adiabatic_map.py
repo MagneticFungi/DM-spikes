@@ -1,14 +1,16 @@
 """Numerical adiabatic mapping through conservation of radial action."""
 
 from collections.abc import Callable
+import math
 from math import fsum
 import warnings
 
 import numpy as np
 from scipy.integrate import IntegrationWarning, quad
+from scipy.interpolate import RectBivariateSpline
 from scipy.optimize import brentq, minimize_scalar, root_scalar
+from scipy.special import expit, logit
 
-from .constants import G
 
 
 Potential = Callable[[float], float]
@@ -42,7 +44,8 @@ def _potential_value(potential, radius, *, allow_negative_infinity=False):
         value = potential(float(radius))
     except Exception as exc:
         raise ValueError(
-            f"potential could not be evaluated at r={radius:.17g}."
+            f"potential could not be evaluated at r={radius:.17g}: "
+            f"{type(exc).__name__}: {exc}"
         ) from exc
     if allow_negative_infinity:
         array = np.asarray(value)
@@ -73,10 +76,37 @@ def _radius_from_log(log_radius):
     return float(np.exp(log_radius))
 
 
+def _orbit_energy_coordinates(energy, potential):
+    """Use the central offset only when it reduces the energy scale.
+
+    Near escape, E and Phi(r) are small already. Subtracting Phi(0) from
+    both would manufacture a cancellation between large, rounded values.
+    Return the same coordinate choice to turning points and action integrals.
+    """
+    offset = getattr(potential, "offset_from_center", None)
+    if callable(offset):
+        center = _finite_scalar(potential.central_potential, "central potential")
+        reduced = fsum((energy, -center))
+        if abs(reduced) < abs(energy):
+            return offset, reduced
+    return None, None
+
+
 def _find_effective_minimum(L, potential, root_xtol, maxiter, max_expansions):
     """Bracket the unique minimum from r = 1, then refine it in log(r)."""
+    has_center_offset = callable(getattr(potential, "offset_from_center", None))
+    offset = None
+    if has_center_offset:
+        offset, _ = _orbit_energy_coordinates(effective_potential(1.0, L, potential), potential)
+
     def value(log_radius):
-        return effective_potential(_radius_from_log(log_radius), L, potential)
+        radius = _radius_from_log(log_radius)
+        if callable(offset):
+            return fsum((
+                _finite_scalar(offset(radius), "potential offset"),
+                0.5 * (L / radius)**2,
+            ))
+        return effective_potential(radius, L, potential)
 
     center = 0.0
     center_value = value(center)
@@ -123,6 +153,16 @@ def _find_effective_minimum(L, potential, root_xtol, maxiter, max_expansions):
                 "max_expansions."
             )
 
+    # The minimum may lie far from r=1. Choose the better energy zero there,
+    # then hold it fixed throughout refinement. Reevaluate stored values in
+    # that same convention before comparing them with the refined minimum.
+    if has_center_offset:
+        offset, _ = _orbit_energy_coordinates(
+            effective_potential(_radius_from_log(best_log), L, potential), potential,
+        )
+        best_value = value(best_log)
+        flat_bracket = any(value(endpoint) == best_value for endpoint in bracket)
+
     minimum = minimize_scalar(
         value,
         bounds=bracket,
@@ -153,6 +193,11 @@ def _find_effective_minimum(L, potential, root_xtol, maxiter, max_expansions):
             "The effective-potential minimum cannot be resolved at the "
             "available numerical precision."
         )
+    if callable(offset):
+        best_value = fsum((
+            _finite_scalar(potential.central_potential, "central potential"),
+            best_value,
+        ))
     return float(best_log), float(best_value), float(local_energy_scale)
 
 
@@ -260,6 +305,8 @@ def find_turning_points(
     if not callable(potential):
         raise TypeError("potential must be callable.")
 
+    offset, reduced_energy = _orbit_energy_coordinates(energy, potential)
+
     root_xtol, root_rtol, maxiter = _validate_solver_tolerances(
         root_xtol, root_rtol, maxiter
     )
@@ -273,17 +320,24 @@ def find_turning_points(
 
     def gap(log_radius, *, allow_singular_center=False):
         radius = _radius_from_log(log_radius)
-        potential_value = _potential_value(
-            potential, radius, allow_negative_infinity=allow_singular_center
-        )
-        if potential_value == -np.inf:
-            return np.inf
         centrifugal = 0.5 * (angular_momentum / radius) ** 2
         if not np.isfinite(centrifugal):
             raise FloatingPointError(
                 f"The centrifugal energy is not finite at r={radius:.17g}."
             )
-        result = fsum((energy, -potential_value, -centrifugal))
+        if reduced_energy is None:
+            potential_value = _potential_value(
+                potential, radius, allow_negative_infinity=allow_singular_center
+            )
+            if potential_value == -np.inf:
+                return np.inf
+            result = fsum((energy, -potential_value, -centrifugal))
+        else:
+            result = fsum((
+                reduced_energy,
+                -_finite_scalar(offset(radius), "potential offset"),
+                -centrifugal,
+            ))
         if not np.isfinite(result):
             raise FloatingPointError(
                 f"The radial energy gap is not finite at r={radius:.17g}."
@@ -342,10 +396,13 @@ def find_turning_points(
         raise ValueError("No allowed radial interval exists for L = 0.")
     if angular_momentum > 0.0:
         peak_radius = _radius_from_log(log_peak)
-        peak_potential = _potential_value(potential, peak_radius)
+        peak_potential = (_potential_value(potential, peak_radius)
+                          if reduced_energy is None else
+                          _finite_scalar(offset(peak_radius), "potential offset"))
+        peak_energy = energy if reduced_energy is None else reduced_energy
         centrifugal = 0.5 * (angular_momentum / peak_radius) ** 2
         gap_resolution = 8.0 * _FLOAT_EPS * max(
-            abs(energy), abs(peak_potential), centrifugal
+            abs(peak_energy), abs(peak_potential), centrifugal
         )
         if peak_gap <= gap_resolution:
             raise FloatingPointError(
@@ -354,16 +411,19 @@ def find_turning_points(
                 "values; the orbit cannot be treated as circular."
             )
 
-    r_minus = _expand_turning_root(
-        log_peak,
-        -1.0,
-        gap,
-        root_xtol,
-        root_rtol,
-        maxiter,
-        max_expansions,
-        center_allowed=(angular_momentum == 0.0),
-    )
+    if angular_momentum == 0.0 and getattr(potential, "radial_center_allowed", False) is True:
+        r_minus = 0.0
+    else:
+        r_minus = _expand_turning_root(
+            log_peak,
+            -1.0,
+            gap,
+            root_xtol,
+            root_rtol,
+            maxiter,
+            max_expansions,
+            center_allowed=(angular_momentum == 0.0),
+        )
     r_plus = _expand_turning_root(
         log_peak,
         1.0,
@@ -443,6 +503,8 @@ def radial_action(
     if r_minus == r_plus:
         return (0.0, 0.0) if return_error else 0.0
 
+    offset, reduced_energy = _orbit_energy_coordinates(energy, potential)
+
     if r_minus > 0.0:
         log_r_minus = np.log(r_minus)
         log_width = np.log(r_plus) - log_r_minus
@@ -467,22 +529,24 @@ def radial_action(
         if jacobian == 0.0:
             return 0.0
 
-        potential_value = _potential_value(potential, radius)
         centrifugal_twice = (angular_momentum / radius) ** 2
         if not np.isfinite(centrifugal_twice):
             raise FloatingPointError(
                 f"The centrifugal energy is not finite at r={radius:.17g}."
             )
-        radicand = 2.0 * fsum((
-            energy, -potential_value, -0.5 * centrifugal_twice
-        ))
+        if reduced_energy is None:
+            potential_value = _potential_value(potential, radius)
+            components = (energy, -potential_value, -0.5 * centrifugal_twice)
+        else:
+            potential_offset = _finite_scalar(offset(radius), "potential offset")
+            components = (reduced_energy, -potential_offset,
+                          -0.5 * centrifugal_twice)
+        radicand = 2.0 * fsum(components)
         if not np.isfinite(radicand):
             raise FloatingPointError(
                 f"The radial-action radicand is not finite at r={radius:.17g}."
             )
-        cancellation_error = 16.0 * _FLOAT_EPS * (
-            abs(energy) + abs(potential_value) + centrifugal_twice
-        )
+        cancellation_error = 16.0 * _FLOAT_EPS * sum(map(abs, components))
         radicand_tolerance = (
             radicand_atol + radicand_rtol * abs(radicand)
             + cancellation_error
@@ -510,7 +574,12 @@ def radial_action(
                 limit=int(limit),
             )
         except IntegrationWarning as exc:
-            raise RuntimeError("The radial-action quadrature did not converge.") from exc
+            raise RuntimeError(
+                "The radial-action quadrature did not converge at "
+                f"E={energy:.17g}, L={angular_momentum:.17g}, "
+                f"r_minus={r_minus:.17g}, r_plus={r_plus:.17g}; "
+                f"quadrature warning: {exc}"
+            ) from exc
 
     action = float(integral / np.pi)
     action_error = float(error / np.pi)
@@ -524,68 +593,6 @@ def radial_action(
             "turning points; the orbit is below numerical resolution."
         )
     return (action, action_error) if return_error else action
-
-
-def radial_action_final_kepler(
-    E_prime,
-    L_prime,
-    M_bh,
-    G=G,
-    *,
-    action_atol=0.0,
-    action_rtol=1e-12,
-):
-    """Return the normalized radial action in the final Kepler potential.
-
-    The subtraction of nearly equal angular momenta cannot recover digits
-    absent from the float inputs. Values above the circular angular momentum
-    are invalid, never silently converted into a circular orbit.
-    ``action_atol`` and ``action_rtol`` distinguish a tiny invalid excess
-    from a clearly invalid one for diagnostic purposes; they do not clip it.
-    """
-    energy = _finite_scalar(E_prime, "E_prime")
-    angular_momentum = _finite_scalar(L_prime, "L_prime")
-    mass = _finite_scalar(M_bh, "M_bh")
-    gravitational_constant = _finite_scalar(G, "G")
-    action_atol = _finite_scalar(action_atol, "action_atol")
-    action_rtol = _finite_scalar(action_rtol, "action_rtol")
-
-    if energy >= 0.0:
-        raise ValueError("E_prime must be negative for a bound Kepler orbit.")
-    if angular_momentum < 0.0:
-        raise ValueError("L_prime must be non-negative.")
-    if mass <= 0.0 or gravitational_constant <= 0.0:
-        raise ValueError("M_bh and G must be positive.")
-    if action_atol < 0.0 or action_rtol < 0.0:
-        raise ValueError("action tolerances must be non-negative.")
-
-    circular_angular_momentum = (
-        gravitational_constant * mass / np.sqrt(-2.0 * energy)
-    )
-    if not np.isfinite(circular_angular_momentum):
-        raise FloatingPointError(
-            "The circular Kepler angular momentum is not finite at float64 "
-            "precision."
-        )
-    scale = max(
-        circular_angular_momentum,
-        angular_momentum,
-        np.finfo(float).tiny,
-    )
-    tolerance = action_atol + action_rtol * scale
-    action = circular_angular_momentum - angular_momentum
-    if action < 0.0:
-        if -action <= tolerance:
-            raise FloatingPointError(
-                "L_prime exceeds the computed circular Kepler angular "
-                "momentum by an amount close to the input precision; "
-                "the orbit cannot be classified as circular."
-            )
-        raise ValueError(
-            "L_prime exceeds the angular momentum of the circular Kepler "
-            "orbit at E_prime."
-        )
-    return float(action)
 
 
 def _automatic_energy_bracket(
@@ -730,14 +737,24 @@ def _automatic_energy_bracket(
     )
 
 
+class _CenteredPotential:
+    """Use a supplied analytic Phi(r)-Phi(0) as the potential's energy zero."""
+
+    def __init__(self, potential):
+        self._offset = potential.offset_from_center
+        self.radial_center_allowed = getattr(potential, "radial_center_allowed", False)
+
+    def __call__(self, radius):
+        return self._offset(radius)
+
+
 def solve_initial_energy(
     E_prime,
     L_prime,
-    M_bh,
     potential,
+    final_potential,
     E_bracket=None,
     *,
-    G=G,
     energy_xtol=1e-12,
     energy_rtol=1e-10,
     maxiter=100,
@@ -745,8 +762,10 @@ def solve_initial_energy(
     action_match_rtol=1e-7,
     radial_action_kwargs=None,
     max_bracket_expansions=2048,
+    _target_action=None,
+    _refinement_attempt=False,
 ):
-    """Solve E(E_prime, L_prime) by conserving normalized radial action.
+    """Solve E(E_prime, L_prime) by conserving action in two potentials.
 
     By default, bound trial orbits at geometrically expanded radii bracket
     the initial energy. An explicit ``E_bracket=(E_min, E_max)`` remains
@@ -759,13 +778,22 @@ def solve_initial_energy(
     energy differences at floating-point precision. ``potential(r)`` must
     return finite, numerically stable float values over the searched radii.
     Its energy zero must match the initial distribution function: the returned
-    E uses exactly that potential's energy convention. No profile-specific
-    offset correction or total action-error estimate is inferred here.
+    E uses exactly that potential's energy convention. If the initial
+    potential supplies a stable ``offset_from_center``, deeply bound orbits
+    are solved and checked in E-Phi(0). Only the returned energy is rounded
+    back to the original convention for evaluating the DF; recomputing its
+    action from that rounded scalar may lose the requested radial-action
+    precision for a nearly circular orbit.
+
+    If the residual check fails, one additional energy solve uses refined
+    action quadrature and turning-point tolerances. Its bracket and endpoint
+    actions are recomputed with those settings; checking only the old energy
+    cannot correct a root displaced by the original action evaluations.
     """
     energy_prime = _finite_scalar(E_prime, "E_prime")
     angular_momentum_prime = _finite_scalar(L_prime, "L_prime")
-    if not callable(potential):
-        raise TypeError("potential must be callable.")
+    if not callable(potential) or not callable(final_potential):
+        raise TypeError("both potentials must be callable.")
     if angular_momentum_prime < 0.0:
         raise ValueError("L_prime must be non-negative.")
 
@@ -776,6 +804,8 @@ def solve_initial_energy(
             or max_bracket_expansions < 1):
         raise ValueError("max_bracket_expansions must be a positive integer.")
     max_bracket_expansions = int(max_bracket_expansions)
+    if type(_refinement_attempt) is not bool:
+        raise TypeError("_refinement_attempt must be boolean")
     action_match_atol = _finite_scalar(
         action_match_atol, "action_match_atol"
     )
@@ -795,12 +825,12 @@ def solve_initial_energy(
             "radial_action_kwargs cannot override return_error."
         )
 
-    target_action = radial_action_final_kepler(
-        energy_prime,
-        angular_momentum_prime,
-        M_bh,
-        G=G,
-    )
+    target_action = (radial_action(
+        energy_prime, angular_momentum_prime, final_potential,
+        **radial_action_kwargs,
+    ) if _target_action is None else _finite_scalar(_target_action, "target_action"))
+    if target_action < 0.0:
+        raise ValueError("target_action must be nonnegative")
 
     action_kwargs = dict(radial_action_kwargs)
 
@@ -815,7 +845,7 @@ def solve_initial_energy(
     if (0.0 < target_action <= target_resolution
             and action_tolerance(target_action) < target_resolution):
         raise FloatingPointError(
-            "The positive final Kepler radial action is only a few float64 "
+            "The positive final radial action is only a few float64 "
             "spacings below the circular angular momentum; its requested "
             "relative accuracy cannot be certified from these inputs."
         )
@@ -870,6 +900,37 @@ def solve_initial_energy(
             raise ValueError("E_bracket must be strictly increasing.")
         action_min = initial_action(energy_min)
         action_max = initial_action(energy_max)
+
+    # Forming Phi(0) + epsilon inside every root evaluation quantizes epsilon
+    # on the much coarser absolute-energy grid. Center the entire solve, not
+    # just the subtraction in radial_action. Keep the original zero near
+    # escape, where centering would instead lose the small binding energy.
+    offset = getattr(potential, "offset_from_center", None)
+    if callable(offset):
+        center = _finite_scalar(potential.central_potential, "central potential")
+        if center != 0.0 and abs(energy_max - center) < 0.5 * abs(center):
+            centered = _CenteredPotential(potential)
+            shifted_bracket = (None if E_bracket is None else (
+                fsum((energy_min, -center)), fsum((energy_max, -center)),
+            ))
+            relative_energy = solve_initial_energy(
+                0.0, angular_momentum_prime, centered, centered,
+                E_bracket=shifted_bracket,
+                energy_xtol=energy_xtol, energy_rtol=energy_rtol,
+                maxiter=maxiter, action_match_atol=action_match_atol,
+                action_match_rtol=action_match_rtol,
+                radial_action_kwargs=action_kwargs,
+                max_bracket_expansions=max_bracket_expansions,
+                _target_action=target_action,
+                _refinement_attempt=_refinement_attempt,
+            )
+            absolute_energy = fsum((center, relative_energy))
+            if relative_energy != 0.0 and absolute_energy == center:
+                raise FloatingPointError(
+                    "The mapped energy rounds to the central potential; "
+                    "it cannot be passed to the DF as an absolute float64 energy."
+                )
+            return absolute_energy
 
     residual_min = action_min - target_action
     residual_max = action_max - target_action
@@ -990,6 +1051,24 @@ def solve_initial_energy(
     if valid and abs(action - first_action) <= tolerance:
         return energy
 
+    if not _refinement_attempt:
+        # Tightening a quadrature can move the root. Solve the conservation
+        # equation again instead of searching only adjacent float64 values
+        # of an energy computed with the previous quadrature. Rebuild an
+        # automatic bracket, or reevaluate the caller's explicit endpoints;
+        # never reuse cached endpoint actions from the coarser solve.
+        return solve_initial_energy(
+            energy_prime, angular_momentum_prime, potential, final_potential,
+            E_bracket=E_bracket,
+            energy_xtol=energy_xtol, energy_rtol=energy_rtol,
+            maxiter=maxiter, action_match_atol=action_match_atol,
+            action_match_rtol=action_match_rtol,
+            radial_action_kwargs=refined_kwargs,
+            max_bracket_expansions=max_bracket_expansions,
+            _target_action=target_action,
+            _refinement_attempt=True,
+        )
+
     # Inspect neighboring representable energies only after a failed check.
     # Their actions cannot by themselves certify the accuracy of potential(r).
     for neighbor in (
@@ -1011,10 +1090,136 @@ def solve_initial_energy(
             "collapsed to zero at the computed initial energy."
         )
     raise RuntimeError(
-        "Insufficient precision to conserve radial action at this float64 "
-        "energy or its immediate neighbors; action evaluations may also be "
-        "limited by potential(r) or turning-point resolution: "
+        "Radial-action conservation failed after a refined energy solve "
+        "and checks of neighboring float64 energies; potential, turning-point "
+        "and quadrature errors are not bounded by the quadrature estimate alone: "
+        f"E={energy:.17g}, L={angular_momentum_prime:.17g}, "
+        f"target_action={target_action:.17g}, "
         f"residual={action - target_action:.17g}, "
+        f"residual_before_quadrature_refinement={first_action - target_action:.17g}, "
         f"quadrature_error_estimate={quadrature_error:.17g}, "
         f"tolerance={tolerance:.17g}."
+    )
+
+
+class InitialActionTable:
+    """Interpolate E_i(I_r, L), certifying each query against the initial action.
+
+    The table is fixed for the entire halo-growth calculation. An interpolated
+    energy is accepted only when a direct radial-action evaluation satisfies
+    the same action tolerance as ``solve_initial_energy``. Otherwise that
+    solver is used with the already-computed final action.
+    """
+
+    def __init__(self, potential, central_potential, log_scales, circularities,
+                 binding_logits):
+        self.potential = potential
+        self.binding_scale = -float(central_potential)
+        self.log_scales = np.asarray(log_scales, dtype=float)
+        self.circularities = np.asarray(circularities, dtype=float)
+        self.binding_logits = np.asarray(binding_logits, dtype=float)
+        if (not callable(potential) or not np.isfinite(self.binding_scale)
+                or self.binding_scale <= 0.0 or len(self.log_scales) < 4
+                or len(self.circularities) < 4
+                or np.any(np.diff(self.log_scales) <= 0.0)
+                or np.any(np.diff(self.circularities) <= 0.0)
+                or self.binding_logits.shape != (
+                    len(self.log_scales), len(self.circularities)
+                ) or not np.all(np.isfinite(self.binding_logits))):
+            raise ValueError("invalid initial action table")
+        self._interpolator = RectBivariateSpline(
+            self.log_scales, self.circularities, self.binding_logits,
+        )
+        self.accepted = 0
+        self.fallback = 0
+
+    def initial_energy(self, target_action, angular_momentum, *, options):
+        total = target_action + angular_momentum
+        if total > 0.0:
+            log_scale = np.log(total)
+            circularity = angular_momentum / total
+            if self.log_scales[0] <= log_scale <= self.log_scales[-1]:
+                logit_binding = float(self._interpolator(log_scale, circularity)[0, 0])
+                candidate = -self.binding_scale * float(expit(logit_binding))
+                action_kwargs = dict(options.get("radial_action_kwargs", {}))
+                try:
+                    action, error = radial_action(
+                        candidate, angular_momentum, self.potential,
+                        return_error=True, **action_kwargs,
+                    )
+                    tolerance = options.get("action_match_atol", 0.0) + (
+                        options.get("action_match_rtol", 1e-7)
+                        * max(abs(action), abs(target_action))
+                    )
+                    if (action > 0.0 or target_action == 0.0) and (
+                        abs(action - target_action) <= tolerance and error <= tolerance
+                    ):
+                        self.accepted += 1
+                        return candidate
+                except (ArithmeticError, RuntimeError, ValueError):
+                    pass
+        self.fallback += 1
+        return solve_initial_energy(
+            0.0, angular_momentum, self.potential, self.potential,
+            _target_action=target_action, **options,
+        )
+
+    def map(self, energy_prime, angular_momentum, final_potential, *, options):
+        target_action = radial_action(
+            energy_prime, angular_momentum, final_potential,
+            **options.get("radial_action_kwargs", {}),
+        )
+        return self.initial_energy(target_action, angular_momentum, options=options)
+
+
+def build_initial_action_table(potential, central_potential, minimum_scale,
+                               maximum_scale, *, points_per_decade=6,
+                               circularity_points=25, map_kwargs=None,
+                               _energy_evaluator=None):
+    """Sample the fixed inverse initial-action surface over a finite domain."""
+    minimum_scale, maximum_scale = float(minimum_scale), float(maximum_scale)
+    if (not np.isfinite(minimum_scale) or not np.isfinite(maximum_scale)
+            or minimum_scale <= 0.0 or maximum_scale <= minimum_scale):
+        raise ValueError("initial action scales must be positive and increasing")
+    if type(points_per_decade) is not int or points_per_decade < 2:
+        raise ValueError("points_per_decade must be at least two")
+    if type(circularity_points) is not int or circularity_points < 4:
+        raise ValueError("circularity_points must be at least four")
+    if _energy_evaluator is not None and not callable(_energy_evaluator):
+        raise TypeError("initial energy evaluator must be callable")
+    options = dict(map_kwargs or {})
+    options.pop("initial_action_table", None)
+    logarithmic_span = math.log10(maximum_scale / minimum_scale)
+    scale_count = max(4, math.ceil(logarithmic_span * points_per_decade) + 1)
+    log_scales = np.linspace(math.log(minimum_scale), math.log(maximum_scale), scale_count)
+    circularities = 0.5 * (1.0 - np.cos(np.linspace(0.0, math.pi, circularity_points)))
+    binding_scale = -float(central_potential)
+    if not np.isfinite(binding_scale) or binding_scale <= 0.0:
+        raise ValueError("central_potential must be negative and finite")
+    targets = []
+    for log_scale in log_scales:
+        scale = math.exp(float(log_scale))
+        for circularity in circularities:
+            angular_momentum = scale * float(circularity)
+            target_action = scale - angular_momentum
+            targets.append((target_action, angular_momentum))
+    if _energy_evaluator is None:
+        energies = [
+            solve_initial_energy(
+                0.0, angular_momentum, potential, potential,
+                _target_action=target_action, **options,
+            )
+            for target_action, angular_momentum in targets
+        ]
+    else:
+        energies = _energy_evaluator(targets, options)
+    energies = np.asarray(energies, dtype=float)
+    if energies.shape != (len(targets),) or not np.all(np.isfinite(energies)):
+        raise ArithmeticError("initial action table returned invalid energies")
+    binding = -energies / binding_scale
+    if np.any(binding <= 0.0) or np.any(binding >= 1.0):
+        raise ArithmeticError("initial action table energy left the bound interval")
+    binding_logits = logit(binding).reshape(scale_count, circularity_points)
+    return InitialActionTable(
+        potential, central_potential, log_scales, circularities, binding_logits,
     )
