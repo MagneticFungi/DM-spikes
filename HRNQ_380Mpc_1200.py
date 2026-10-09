@@ -18,7 +18,7 @@ from dm_spikes.final_profile import schwarzschild_radius
 from dm_spikes.profile_jobs import run_profile
 
 
-M_HALO = 2.06e11  # Msun
+M_HALO = 6.06e11  # Msun
 SCALE_RADIUS = 40_000.0  # pc = 40 kpc
 M_BH = 2.6e6  # Msun
 OUTER_RADIUS = 380.0e6  # pc = 380 Mpc
